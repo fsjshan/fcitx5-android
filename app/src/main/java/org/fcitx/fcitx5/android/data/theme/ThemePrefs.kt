@@ -34,7 +34,7 @@ class ThemePrefs(sharedPreferences: SharedPreferences) :
         return pref
     }
 
-    val keyBorder = switch(R.string.key_border, "key_border", false)
+    val keyBorder = switch(R.string.key_border, "key_border", true)
 
     val keyRippleEffect = switch(R.string.key_ripple_effect, "key_ripple_effect", false)
 

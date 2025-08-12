@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("org.fcitx.fcitx5.android.app-convention")
     id("org.fcitx.fcitx5.android.native-app-convention")
@@ -33,6 +35,19 @@ android {
         }
     }
 
+    signingConfigs {
+        val signProperties = Properties().apply {
+            file("./config/sign.properties").reader().use { load(it) }
+        }
+
+        create("release") {
+            storeFile = file(signProperties.getProperty("keystore.path"))
+            storePassword = signProperties.getProperty("keystore.password")
+            keyAlias = signProperties.getProperty("key.alias")
+            keyPassword = signProperties.getProperty("key.password")
+        }
+    }
+
     buildTypes {
         release {
             proguardFiles(
@@ -43,11 +58,15 @@ android {
             resValue("mipmap", "app_icon", "@mipmap/ic_launcher")
             resValue("mipmap", "app_icon_round", "@mipmap/ic_launcher_round")
             resValue("string", "app_name", "@string/app_name_release")
+
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
             resValue("mipmap", "app_icon", "@mipmap/ic_launcher_debug")
             resValue("mipmap", "app_icon_round", "@mipmap/ic_launcher_round_debug")
             resValue("string", "app_name", "@string/app_name_debug")
+
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
