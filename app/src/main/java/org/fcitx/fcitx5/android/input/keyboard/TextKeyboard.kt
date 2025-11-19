@@ -44,15 +44,15 @@ class TextKeyboard(
                 AlphabetKey("P", "0")
             ),
             listOf(
-                AlphabetKey("A", "@"),
-                AlphabetKey("S", "*"),
-                AlphabetKey("D", "+"),
-                AlphabetKey("F", "-"),
-                AlphabetKey("G", "="),
-                AlphabetKey("H", "/"),
-                AlphabetKey("J", "#"),
-                AlphabetKey("K", "("),
-                AlphabetKey("L", ")")
+                AlphabetKey("A", "@", 1.0f / 9),
+                AlphabetKey("S", "*", 1.0f / 9),
+                AlphabetKey("D", "+", 1.0f / 9),
+                AlphabetKey("F", "-", 1.0f / 9),
+                AlphabetKey("G", "=", 1.0f / 9),
+                AlphabetKey("H", "/", 1.0f / 9),
+                AlphabetKey("J", "#", 1.0f / 9),
+                AlphabetKey("K", "(", 1.0f / 9),
+                AlphabetKey("L", ")", 1.0f / 9)
             ),
             listOf(
                 CapsKey(),

@@ -105,3 +105,4 @@ lint/tmp/
 
 # config
 app/config/
+app/keystore/

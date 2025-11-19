@@ -39,6 +39,7 @@ import splitties.views.dsl.constraintlayout.rightOfParent
 import splitties.views.dsl.constraintlayout.rightToLeftOf
 import splitties.views.dsl.constraintlayout.topOfParent
 import splitties.views.dsl.core.add
+import splitties.views.dsl.core.matchParent
 import timber.log.Timber
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
@@ -133,12 +134,19 @@ abstract class BaseKeyboard(
             }
         }
         keyRows.forEachIndexed { index, row ->
-            add(row, lParams {
-                if (index == 0) topOfParent()
-                else below(keyRows[index - 1])
-                if (index == keyRows.size - 1) bottomOfParent()
-                else above(keyRows[index + 1])
+            add(row, lParams(matchParent, dp(84)) {
+                if (index == 0) {
+                    topOfParent(dp(4))
+                } else {
+                    below(keyRows[index - 1])
+                    topMargin = dp(2) // 添加8dp行间距
+                }
+//                if (index == keyRows.size - 1) bottomOfParent()
+//                else above(keyRows[index + 1])
                 centerHorizontally()
+                // 添加左右边距8dp
+                marginStart = dp(6)
+                marginEnd = dp(6)
             })
         }
         spaceSwipeMoveCursor.registerOnChangeListener(spaceSwipeChangeListener)

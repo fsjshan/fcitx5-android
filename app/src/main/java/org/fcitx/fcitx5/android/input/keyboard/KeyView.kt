@@ -118,9 +118,12 @@ abstract class KeyView(ctx: Context, val theme: Theme, val def: KeyDef.Appearanc
         // key border
         if ((bordered && def.border != Border.Off) || def.border == Border.On) {
             val bkgColor = when (def.variant) {
-                Variant.Normal, Variant.AltForeground -> theme.keyBackgroundColor
-                Variant.Alternative -> theme.altKeyBackgroundColor
-                Variant.Accent -> theme.accentKeyBackgroundColor
+//                Variant.Normal, Variant.AltForeground -> theme.keyBackgroundColor
+                Variant.Normal, Variant.AltForeground -> 0xFF000000.toInt()
+//                Variant.Alternative -> theme.altKeyBackgroundColor
+                Variant.Alternative -> 0xFF000000.toInt()
+//                Variant.Accent -> theme.accentKeyBackgroundColor
+                Variant.Accent -> 0xFF000000.toInt()
             }
             val shadowWidth = dp(1)
             // background: key border
@@ -378,10 +381,13 @@ private fun ImageView.configure(theme: Theme, @DrawableRes src: Int, variant: Va
     isClickable = false
     isFocusable = false
     imageTintList = ColorStateList.valueOf(
-        when (variant) {
-            Variant.Normal -> theme.keyTextColor
-            Variant.AltForeground, Variant.Alternative -> theme.altKeyTextColor
-            Variant.Accent -> theme.accentKeyTextColor
+        when {
+            // Special handling for language icon - use fixed blue color
+            src == org.fcitx.fcitx5.android.R.drawable.ic_baseline_language_24 -> 0xFF0080FF.toInt()
+            variant == Variant.Normal -> theme.keyTextColor
+            variant == Variant.AltForeground || variant == Variant.Alternative -> theme.altKeyTextColor
+            variant == Variant.Accent -> theme.accentKeyTextColor
+            else -> theme.keyTextColor
         }
     )
     imageResource = src

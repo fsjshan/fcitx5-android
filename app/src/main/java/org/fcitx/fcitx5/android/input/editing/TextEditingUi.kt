@@ -79,10 +79,10 @@ class TextEditingUi(
     val cutButton = textButton(android.R.string.cut, altStyle = true).apply {
         visibility = View.GONE
     }
+val copyButton = textButton(android.R.string.copy, altStyle = true)
 
-    val copyButton = textButton(android.R.string.copy, altStyle = true)
-
-    val pasteButton = textButton(android.R.string.paste, altStyle = true)
+val pasteButton = textButton(android.R.string.paste, altStyle = true)
+    
 
     val backspaceButton = iconButton(R.drawable.ic_baseline_backspace_24, altStyle = true).apply {
         soundEffect = InputFeedbacks.SoundEffect.Delete

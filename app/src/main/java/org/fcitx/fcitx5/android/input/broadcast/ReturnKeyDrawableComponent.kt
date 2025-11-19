@@ -20,6 +20,7 @@ class ReturnKeyDrawableComponent :
     companion object {
         @DrawableRes
         val DEFAULT_DRAWABLE = R.drawable.ic_baseline_keyboard_return_24
+        const val INPUT_TEXT = "输入"
     }
 
     private val broadcaster: InputBroadcaster by manager.must()
@@ -48,7 +49,8 @@ class ReturnKeyDrawableComponent :
     }
 
     fun updateDrawableOnEditorInfo(info: EditorInfo) {
-        actionDrawable = drawableFromEditorInfo(info)
+        // 始终使用默认的回车图标，因为我们现在有专门的"输入"按钮
+        actionDrawable = DEFAULT_DRAWABLE
         if (resourceId == actionDrawable) return
         resourceId = actionDrawable
         broadcaster.onReturnKeyDrawableUpdate(resourceId)

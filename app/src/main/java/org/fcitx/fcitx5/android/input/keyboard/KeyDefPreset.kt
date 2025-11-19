@@ -42,6 +42,7 @@ class SymbolKey(
 class AlphabetKey(
     val character: String,
     val punctuation: String,
+    percentWidth: Float = 0.1f,
     variant: Variant = Variant.Normal,
     popup: Array<Popup>? = null
 ) : KeyDef(
@@ -49,6 +50,7 @@ class AlphabetKey(
         displayText = character,
         altText = punctuation,
         textSize = 23f,
+        percentWidth = percentWidth,
         variant = variant
     ),
     setOf(

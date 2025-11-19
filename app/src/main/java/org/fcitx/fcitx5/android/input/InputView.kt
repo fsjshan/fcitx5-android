@@ -13,6 +13,8 @@ import android.view.View.OnClickListener
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InlineSuggestionsResponse
+import android.widget.Button
+import android.widget.EditText
 import android.widget.ImageView
 import androidx.annotation.Keep
 import androidx.annotation.RequiresApi
@@ -45,6 +47,7 @@ import org.mechdancer.dependency.DynamicScope
 import org.mechdancer.dependency.manager.wrapToUniqueComponent
 import org.mechdancer.dependency.plusAssign
 import splitties.dimensions.dp
+import splitties.views.backgroundColor
 import splitties.views.dsl.constraintlayout.above
 import splitties.views.dsl.constraintlayout.below
 import splitties.views.dsl.constraintlayout.bottomOfParent
@@ -58,6 +61,8 @@ import splitties.views.dsl.constraintlayout.startOfParent
 import splitties.views.dsl.constraintlayout.startToEndOf
 import splitties.views.dsl.constraintlayout.topOfParent
 import splitties.views.dsl.core.add
+import splitties.views.dsl.core.button
+import splitties.views.dsl.core.editText
 import splitties.views.dsl.core.imageView
 import splitties.views.dsl.core.matchParent
 import splitties.views.dsl.core.view
@@ -91,6 +96,71 @@ class InputView(
         // height as keyboardBottomPadding
         // bottomMargin as WindowInsets (Navigation Bar) offset
         setOnClickListener(placeholderOnClickListener)
+    }
+
+    // 用于显示当前EditText内容的EditText
+    private val currentContentEditText = editText {
+        hint = ""
+        isEnabled = true
+        isFocusable = true
+        isFocusableInTouchMode = true
+        setPadding(dp(16), dp(12), dp(16), dp(12))
+        textSize = 18f
+        setTextColor(0xFFFFFFFF.toInt()) // 白色文字
+        setHintTextColor(0xFF888888.toInt()) // 灰色提示文字
+        // 设置背景色为#17171A，去除圆角
+        val drawable = android.graphics.drawable.GradientDrawable()
+        drawable.setColor(0xFF17171A.toInt()) // 背景色#17171A
+//        drawable.cornerRadius = 0f // 去除圆角
+        background = drawable
+    }
+
+    // EditText左端填充矩形 - 与EditText同高度，背景色#17171A
+    private val leftFillRect = view(::View) {
+        val drawable = android.graphics.drawable.GradientDrawable()
+        drawable.setColor(0xFF17171A.toInt()) // 背景色#17171A
+        background = drawable
+    }
+
+    // EditText右端填充矩形 - 与EditText同高度，背景色#17171A
+    private val rightFillRect = view(::View) {
+        val drawable = android.graphics.drawable.GradientDrawable()
+        drawable.setColor(0xFF17171A.toInt()) // 背景色#17171A
+        background = drawable
+    }
+
+    // 取消按钮（左上角）- 按照设计图样式：17px圆角，66x34px尺寸，#303033背景色
+    private val cancelButton = button {
+        text = "取消"
+        setPadding(0, 0, 0, 0)
+        setTextColor(0xCCFFFFFF.toInt()) // 白色文字
+        textSize = 17f
+        val drawable = android.graphics.drawable.GradientDrawable()
+        drawable.setColor(0xFF303033.toInt()) // 背景色#303033
+        drawable.cornerRadius = dp(17).toFloat() // 17px圆角
+        background = drawable
+        setOnClickListener {
+            // 清空内容并隐藏输入法
+            clearCurrentContent()
+            service.requestHideSelf(0)
+        }
+    }
+
+    
+
+    // 确定按钮（右上角）- 按照设计图样式：17px圆角，66x34px尺寸，#303033背景色
+    private val confirmButton = button {
+        text = "确定"
+        setPadding(0, 0, 0, 0)
+        setTextColor(0xCCFFFFFF.toInt()) // 白色文字
+        textSize = 14f
+        val drawable = android.graphics.drawable.GradientDrawable()
+        drawable.setColor(0xFF303033.toInt()) // 背景色#303033
+        drawable.cornerRadius = dp(17).toFloat() // 17px圆角
+        background = drawable
+        setOnClickListener {
+            service.handleInputButtonClick()
+        }
     }
 
     private val scope = DynamicScope()
@@ -204,7 +274,7 @@ class InputView(
 
         broadcaster.onImeUpdate(fcitx.runImmediately { inputMethodEntryCached })
 
-        customBackground.imageDrawable = theme.backgroundDrawable(keyBorder)
+//        customBackground.imageDrawable = theme.backgroundDrawable(keyBorder)
 
         keyboardView = constraintLayout {
             // allow MotionEvent to be delivered to keyboard while pressing on padding views.
@@ -212,12 +282,57 @@ class InputView(
             // but it's not the case on some devices ... just set it here
             isMotionEventSplittingEnabled = true
             add(customBackground, lParams {
-                centerVertically()
-                centerHorizontally()
-            })
-            add(kawaiiBar.view, lParams(matchParent, dp(KawaiiBarComponent.HEIGHT)) {
                 topOfParent()
                 centerHorizontally()
+                topMargin = dp(8) // 与EditText顶部对齐
+                val drawable = android.graphics.drawable.GradientDrawable()
+                drawable.setColor(0xFF17171A.toInt())
+                background = drawable
+            })
+            // 添加左端填充矩形 - 与EditText同高度，背景色#17171A
+            add(leftFillRect, lParams(0, dp(84)) {
+                topOfParent()
+                startOfParent()
+                endToStartOf(currentContentEditText)
+                topMargin = dp(8)
+            })
+            // 添加右端填充矩形 - 与EditText同高度，背景色#17171A
+            add(rightFillRect, lParams(0, dp(84)) {
+                topOfParent()
+                startToEndOf(currentContentEditText)
+                endOfParent()
+                topMargin = dp(8)
+            })
+            // 添加当前内容显示的EditText到最顶部 - 设置1724x84px尺寸
+            add(currentContentEditText, lParams(dp(1724), dp(84)) {
+                topOfParent()
+                centerHorizontally()
+                topMargin = dp(8)
+            })
+            // 添加取消按钮到左端填充矩形中居中 - 66x34px尺寸，#303033背景色
+            add(cancelButton, lParams(dp(66), dp(34)) {
+                topOfParent()
+                startOfParent()
+                endToStartOf(currentContentEditText)
+                topMargin = dp(33) // 垂直居中：(84-34)/2 + 8 = 33
+            })
+            // 添加确定按钮到右端填充矩形中居中 - 66x34px尺寸，#303033背景色
+            add(confirmButton, lParams(dp(66), dp(34)) {
+                topOfParent()
+                startToEndOf(currentContentEditText)
+                endOfParent()
+                topMargin = dp(33) // 垂直居中：(84-34)/2 + 8 = 33
+            })
+            
+            add(kawaiiBar.view, lParams(matchParent, dp(KawaiiBarComponent.HEIGHT)) {
+                below(currentContentEditText)
+                val drawable = android.graphics.drawable.GradientDrawable()
+                drawable.setColor(0xFF17171A.toInt())
+                background = drawable
+                centerHorizontally()
+                topMargin = dp(0) // 与EditText的间距
+                marginStart = dp(8) // 左间距
+                marginEnd = dp(8) // 右间距
             })
             add(leftPaddingSpace, lParams {
                 below(kawaiiBar.view)
@@ -349,6 +464,29 @@ class InputView(
     fun handleInlineSuggestions(response: InlineSuggestionsResponse): Boolean {
         return kawaiiBar.handleInlineSuggestions(response)
     }
+
+    /**
+     * 更新当前内容显示EditText的文本
+     */
+    fun updateCurrentContent(text: String) {
+        currentContentEditText.setText(text)
+        currentContentEditText.setSelection(text.length) // 将光标移到末尾
+    }
+
+    /**
+     * 获取当前内容EditText中的文本
+     */
+    fun getCurrentContent(): String {
+        return currentContentEditText.text.toString()
+    }
+
+    /**
+     * 清空当前内容EditText
+     */
+    fun clearCurrentContent() {
+        currentContentEditText.setText("")
+    }
+
 
     override fun onDetachedFromWindow() {
         keyboardPrefs.unregisterOnChangeListener(onKeyboardSizeChangeListener)

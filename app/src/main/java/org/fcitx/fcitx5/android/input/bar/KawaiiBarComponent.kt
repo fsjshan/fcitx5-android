@@ -5,6 +5,7 @@
 package org.fcitx.fcitx5.android.input.bar
 
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.util.Size
 import android.view.KeyEvent
@@ -341,9 +342,11 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
 
     override val view by lazy {
         ViewAnimator(context).apply {
-            backgroundColor =
-                if (ThemeManager.prefs.keyBorder.getValue()) Color.TRANSPARENT
-                else theme.barColor
+            // 创建带4dp圆角的黑色背景
+            background = GradientDrawable().apply {
+                setColor(0xFF000000.toInt())  // 黑色背景
+                cornerRadius = dp(4).toFloat()  // 4dp圆角
+            }
             add(idleUi.root, lParams(matchParent, matchParent))
             add(candidateUi.root, lParams(matchParent, matchParent))
             add(titleUi.root, lParams(matchParent, matchParent))
@@ -466,7 +469,7 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
     }
 
     companion object {
-        const val HEIGHT = 40
+        const val HEIGHT = 84
     }
 
     fun onKeyboardLayoutSwitched(isNumber: Boolean) {
