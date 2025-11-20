@@ -331,8 +331,8 @@ class InputView(
                 background = drawable
                 centerHorizontally()
                 topMargin = dp(0) // 与EditText的间距
-                marginStart = dp(2) // 左间距
-                marginEnd = dp(2) // 右间距
+                marginStart = dp(4) // 左间距
+                marginEnd = dp(4) // 右间距
             })
             add(leftPaddingSpace, lParams {
                 below(kawaiiBar.view)
