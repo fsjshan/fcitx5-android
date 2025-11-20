@@ -304,7 +304,7 @@ class InputView(
                 topMargin = dp(8)
             })
             // 添加当前内容显示的EditText到最顶部 - 设置1724x84px尺寸
-            add(currentContentEditText, lParams(dp(1724), dp(84)) {
+            add(currentContentEditText, lParams(dp(284), dp(84)) {
                 topOfParent()
                 centerHorizontally()
                 topMargin = dp(8)
@@ -331,8 +331,8 @@ class InputView(
                 background = drawable
                 centerHorizontally()
                 topMargin = dp(0) // 与EditText的间距
-                marginStart = dp(8) // 左间距
-                marginEnd = dp(8) // 右间距
+                marginStart = dp(2) // 左间距
+                marginEnd = dp(2) // 右间距
             })
             add(leftPaddingSpace, lParams {
                 below(kawaiiBar.view)

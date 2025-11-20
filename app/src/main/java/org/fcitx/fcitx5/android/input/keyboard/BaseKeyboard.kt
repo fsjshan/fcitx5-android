@@ -134,19 +134,19 @@ abstract class BaseKeyboard(
             }
         }
         keyRows.forEachIndexed { index, row ->
-            add(row, lParams(matchParent, dp(84)) {
+            add(row, lParams(matchParent, dp(66)) {
                 if (index == 0) {
-                    topOfParent(dp(4))
+                    topOfParent(dp(2))
                 } else {
                     below(keyRows[index - 1])
-                    topMargin = dp(2) // 添加8dp行间距
+                    topMargin = dp(1) // 添加8dp行间距
                 }
 //                if (index == keyRows.size - 1) bottomOfParent()
 //                else above(keyRows[index + 1])
                 centerHorizontally()
-                // 添加左右边距8dp
-                marginStart = dp(6)
-                marginEnd = dp(6)
+                // 添加左右边距2dp
+                marginStart = dp(2)
+                marginEnd = dp(2)
             })
         }
         spaceSwipeMoveCursor.registerOnChangeListener(spaceSwipeChangeListener)
