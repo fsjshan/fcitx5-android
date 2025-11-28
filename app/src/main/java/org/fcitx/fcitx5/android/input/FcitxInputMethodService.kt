@@ -214,10 +214,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     private fun handleFcitxEvent(event: FcitxEvent<*>) {
         when (event) {
             is FcitxEvent.CommitStringEvent -> {
-                // 将输入内容添加到顶端EditText而不是直接提交
-                val currentContent = inputView?.getCurrentContent() ?: ""
-                val newContent = currentContent + event.data.text
-                inputView?.updateCurrentContent(newContent)
+                commitText(event.data.text, event.data.cursor)
             }
             is FcitxEvent.KeyEvent -> event.data.let event@{
                 if (it.states.virtual) {
@@ -228,10 +225,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                         FcitxKeyMapping.FcitxKey_Left -> sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_LEFT)
                         FcitxKeyMapping.FcitxKey_Right -> sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_RIGHT)
                         else -> if (it.unicode > 0) {
-                            // 将字符添加到顶端EditText而不是直接提交
-                            val currentContent = inputView?.getCurrentContent() ?: ""
-                            val newContent = currentContent + Character.toString(it.unicode)
-                            inputView?.updateCurrentContent(newContent)
+                            commitText(Character.toString(it.unicode))
                         } else {
                             Timber.w("Unhandled Virtual KeyEvent: $it")
                         }
@@ -256,10 +250,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                     } else {
                         // no matching keyCode, commit character once on key down
                         if (!it.up && it.unicode > 0) {
-                            // 将字符添加到顶端EditText而不是直接提交
-                            val currentContent = inputView?.getCurrentContent() ?: ""
-                            val newContent = currentContent + Character.toString(it.unicode)
-                            inputView?.updateCurrentContent(newContent)
+                            commitText(Character.toString(it.unicode))
                         } else {
                             Timber.w("Unhandled Fcitx KeyEvent: $it")
                         }
@@ -267,11 +258,6 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 }
             }
             is FcitxEvent.ClientPreeditEvent -> {
-                // 将预编辑文本也显示在顶端EditText中
-                val currentContent = inputView?.getCurrentContent() ?: ""
-                val preeditText = event.data.toString()
-                // 这里可以选择显示预编辑文本或者暂时不处理
-                // inputView?.updateCurrentContent(currentContent + preeditText)
                 updateComposingText(event.data)
             }
             is FcitxEvent.DeleteSurroundingEvent -> {
@@ -301,23 +287,11 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         } else {
             ic.deleteSurroundingText(before, after)
         }
+        // 同步到顶端EditText
+        syncToTopEditText()
     }
 
     private fun handleBackspaceKey() {
-        // 优先处理输入法UI顶端EditText中的内容
-        val currentContent = inputView?.getCurrentContent() ?: ""
-        if (currentContent.isNotEmpty()) {
-            // 删除输入法UI顶端EditText中的最后一个字符
-            val newContent = if (currentContent.length > 1) {
-                currentContent.substring(0, currentContent.length - 1)
-            } else {
-                ""
-            }
-            inputView?.updateCurrentContent(newContent)
-            return
-        }
-        
-        // 如果输入法UI顶端EditText为空，则执行原来的逻辑（操作目标EditText）
         val lastSelection = selection.latest
         if (lastSelection.isNotEmpty()) {
             selection.predict(lastSelection.start)
@@ -331,11 +305,15 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             currentInputEditorInfo.inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL
         ) {
             sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+            // 同步到顶端EditText
+            syncToTopEditText()
             return
         }
         if (lastSelection.isEmpty()) {
             if (lastSelection.start <= 0) {
                 sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+                // 同步到顶端EditText
+                syncToTopEditText()
                 return
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -346,179 +324,42 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         } else {
             currentInputConnection.commitText("", 0)
         }
+        // 同步到顶端EditText
+        syncToTopEditText()
     }
 
-    private fun handleReturnKey() {
-        // 获取输入法UI中EditText的内容
-        val inputContent = inputView?.getCurrentContent() ?: ""
-        
-        if (inputContent.isNotEmpty()) {
-            // 如果有内容，则将内容提交到原EditText并隐藏输入法
-            currentInputConnection?.let { ic ->
-                // 清空原EditText内容
-                ic.deleteSurroundingText(1000, 1000)
-                // 提交新内容
-                ic.commitText(inputContent, 1)
-                // 清空输入法UI中的EditText
-                inputView?.clearCurrentContent()
-            }
-            // 隐藏输入法
-            requestHideSelf(0)
-            return
-        }
-        
-        // 如果没有内容，执行原来的逻辑
+    fun handleReturnKey() {
         currentInputEditorInfo.run {
             if (inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL) {
                 sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
+                // 隐藏键盘
+                requestHideSelf(0)
                 return
             }
             if (imeOptions.hasFlag(EditorInfo.IME_FLAG_NO_ENTER_ACTION)) {
                 commitText("\n")
+                // 隐藏键盘
+                requestHideSelf(0)
                 return
             }
             if (actionLabel?.isNotEmpty() == true && actionId != EditorInfo.IME_ACTION_UNSPECIFIED) {
                 currentInputConnection.performEditorAction(actionId)
+                // 隐藏键盘
+                requestHideSelf(0)
                 return
             }
             when (val action = imeOptions and EditorInfo.IME_MASK_ACTION) {
                 EditorInfo.IME_ACTION_UNSPECIFIED,
-                EditorInfo.IME_ACTION_NONE -> commitText("\n")
-                else -> currentInputConnection.performEditorAction(action)
-            }
-        }
-    }
-
-    /**
-     * 处理输入按键点击，将输入法UI顶端EditText的内容提交到目标输入框
-     * 针对账号、密码、验证码等特殊输入框类型进行优化
-     */
-    fun handleInputButtonClick() {
-        val inputContent = inputView?.getCurrentContent() ?: ""
-        if (inputContent.isNotEmpty()) {
-            // 清空输入法UI中的EditText
-            inputView?.clearCurrentContent()
-            
-            // 检测输入框类型并使用相应的处理策略
-            val editorInfo = currentInputEditorInfo
-            val inputType = editorInfo?.inputType ?: 0
-            
-            currentInputConnection?.let { ic ->
-                try {
-                    // 针对不同类型的输入框使用不同的策略
-                    when {
-                        // 密码输入框
-                        (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
-                        (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
-                        (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD -> {
-                            handlePasswordInput(ic, inputContent)
-                        }
-                        // 邮箱地址输入框
-                        (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS ||
-                        (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS -> {
-                            handleEmailInput(ic, inputContent)
-                        }
-                        // 数字输入框（可能是验证码）
-                        (inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER -> {
-                            handleNumberInput(ic, inputContent)
-                        }
-                        // 普通文本输入框
-                        else -> {
-                            handleGeneralTextInput(ic, inputContent)
-                        }
-                    }
-                } catch (e: Exception) {
-                    // 最后的备用方案
-                    handleFallbackInput(ic, inputContent)
+                EditorInfo.IME_ACTION_NONE -> {
+                    commitText("\n")
+                    // 隐藏键盘
+                    requestHideSelf(0)
                 }
-            }
-        }
-        // 隐藏输入法
-        requestHideSelf(0)
-    }
-    
-    /**
-     * 处理密码输入框
-     */
-    private fun handlePasswordInput(ic: android.view.inputmethod.InputConnection, content: String) {
-        try {
-            // 密码框通常不允许选择所有内容，直接逐字符输入
-            ic.beginBatchEdit()
-            // 先清空现有内容
-            ic.deleteSurroundingText(1000, 1000)
-            // 逐字符提交，确保每个字符都被正确处理
-            content.forEach { char ->
-                ic.commitText(char.toString(), 1)
-            }
-            ic.endBatchEdit()
-        } catch (e: Exception) {
-            // 备用方案：直接提交整个字符串
-            ic.commitText(content, 1)
-        }
-    }
-    
-    /**
-     * 处理邮箱输入框
-     */
-    private fun handleEmailInput(ic: android.view.inputmethod.InputConnection, content: String) {
-        try {
-            ic.beginBatchEdit()
-            ic.performContextMenuAction(android.R.id.selectAll)
-            ic.commitText(content, 1)
-            ic.endBatchEdit()
-        } catch (e: Exception) {
-            ic.commitText(content, 1)
-        }
-    }
-    
-    /**
-     * 处理数字输入框（验证码等）
-     */
-    private fun handleNumberInput(ic: android.view.inputmethod.InputConnection, content: String) {
-        try {
-            ic.beginBatchEdit()
-            // 清空现有内容
-            ic.deleteSurroundingText(1000, 1000)
-            // 只提交数字字符
-            val numericContent = content.filter { it.isDigit() }
-            ic.commitText(numericContent, 1)
-            ic.endBatchEdit()
-        } catch (e: Exception) {
-            ic.commitText(content, 1)
-        }
-    }
-    
-    /**
-     * 处理普通文本输入框
-     */
-    private fun handleGeneralTextInput(ic: android.view.inputmethod.InputConnection, content: String) {
-        try {
-            ic.beginBatchEdit()
-            ic.performContextMenuAction(android.R.id.selectAll)
-            ic.commitText(content, 1)
-            ic.endBatchEdit()
-        } catch (e: Exception) {
-            ic.commitText(content, 1)
-        }
-    }
-    
-    /**
-     * 最后的备用输入方案
-     */
-    private fun handleFallbackInput(ic: android.view.inputmethod.InputConnection, content: String) {
-        try {
-            // 方案1: 使用setComposingText
-            ic.setComposingText(content, 1)
-            ic.finishComposingText()
-        } catch (e: Exception) {
-            try {
-                // 方案2: 逐字符输入
-                content.forEach { char ->
-                    ic.commitText(char.toString(), 1)
+                else -> {
+                    currentInputConnection.performEditorAction(action)
+                    // 隐藏键盘
+                    requestHideSelf(0)
                 }
-            } catch (e2: Exception) {
-                // 方案3: 直接提交
-                ic.commitText(content, 1)
             }
         }
     }
@@ -537,6 +378,8 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 }
                 ic.finishComposingText()
             }
+            // 同步到顶端EditText
+            syncToTopEditText()
             return
         }
         // committed text should replace composing (if any), replace selected range (if any),
@@ -554,6 +397,8 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 setSelection(target, target)
             }
         }
+        // 同步到顶端EditText
+        syncToTopEditText()
     }
 
     private fun sendDownKeyEvent(eventTime: Long, keyEventCode: Int, metaState: Int = 0) {
@@ -635,6 +480,62 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         currentInputConnection?.setSelection(end, end)
     }
 
+    /**
+     * 获取目标输入框的完整文本内容
+     */
+    fun getTargetInputFieldContent(): String {
+        val ic = currentInputConnection ?: return ""
+        return try {
+            // 使用合理的最大长度限制，避免内存溢出
+            val maxLength = 10000 // 限制为10000字符
+            
+            // 获取光标前的文本
+            val beforeCursor = ic.getTextBeforeCursor(maxLength, 0)?.toString() ?: ""
+            // 获取光标后的文本
+            val afterCursor = ic.getTextAfterCursor(maxLength, 0)?.toString() ?: ""
+            // 获取当前选中的文本
+            val selectedText = ic.getSelectedText(0)?.toString() ?: ""
+            
+            // 如果有选中文本，则返回 beforeCursor + selectedText + afterCursor
+            // 如果没有选中文本，则返回 beforeCursor + afterCursor
+            if (selectedText.isNotEmpty()) {
+                beforeCursor + selectedText + afterCursor
+            } else {
+                beforeCursor + afterCursor
+            }
+        } catch (e: Exception) {
+            Timber.w("Failed to get target input field content: ${e.message}")
+            ""
+        }
+    }
+
+    /**
+     * 获取目标输入框中光标的位置
+     */
+    fun getTargetInputFieldCursorPosition(): Int {
+        val ic = currentInputConnection ?: return 0
+        return try {
+            // 使用合理的最大长度限制
+            val maxLength = 10000
+            val beforeCursor = ic.getTextBeforeCursor(maxLength, 0)?.toString() ?: ""
+            beforeCursor.length
+        } catch (e: Exception) {
+            Timber.w("Failed to get target input field cursor position: ${e.message}")
+            0
+        }
+    }
+
+    /**
+     * 同步目标输入框内容到顶端EditText
+     */
+    private fun syncToTopEditText() {
+        try {
+            inputView?.syncFromTargetInputField()
+        } catch (e: Exception) {
+            Timber.w("Failed to sync to top EditText: ${e.message}")
+        }
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         postFcitxJob { reset() }
@@ -683,12 +584,21 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     private var inputViewLocation = intArrayOf(0, 0)
 
     override fun onComputeInsets(outInsets: Insets) {
-        // 修改输入法窗口行为，防止EditText上下移动
-        // 使用TOUCHABLE_INSETS_FRAME让输入法浮在应用界面上方，不影响布局
-        outInsets.apply {
-            contentTopInsets = 0
-            visibleTopInsets = 0
-            touchableInsets = Insets.TOUCHABLE_INSETS_FRAME
+        if (inputDeviceMgr.isVirtualKeyboard) {
+            inputView?.keyboardView?.getLocationInWindow(inputViewLocation)
+            outInsets.apply {
+                contentTopInsets = inputViewLocation[1]
+                visibleTopInsets = inputViewLocation[1]
+                touchableInsets = Insets.TOUCHABLE_INSETS_VISIBLE
+            }
+        } else {
+            val n = decorView.findViewById<View>(android.R.id.navigationBarBackground)?.height ?: 0
+            val h = decorView.height - n
+            outInsets.apply {
+                contentTopInsets = h
+                visibleTopInsets = h
+                touchableInsets = Insets.TOUCHABLE_INSETS_VISIBLE
+            }
         }
     }
 
@@ -849,14 +759,6 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             // because onStartInputView will always be called after onStartInput,
             // editorInfo and capFlags should be up-to-date
             inputView?.startInput(info, capabilityFlags, restarting)
-            
-            // 获取当前EditText的内容并显示在输入法UI中
-            currentInputConnection?.let { ic ->
-                val currentText = ic.getTextBeforeCursor(1000, 0)?.toString() ?: ""
-                val textAfterCursor = ic.getTextAfterCursor(1000, 0)?.toString() ?: ""
-                val fullText = currentText + textAfterCursor
-                inputView?.updateCurrentContent(fullText)
-            }
         } else {
             if (currentInputConnection?.monitorCursorAnchor() != true) {
                 if (!decorLocationUpdated) {

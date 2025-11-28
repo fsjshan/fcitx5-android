@@ -69,6 +69,7 @@ import splitties.views.dsl.core.view
 import splitties.views.dsl.core.withTheme
 import splitties.views.dsl.core.wrapContent
 import splitties.views.imageDrawable
+import timber.log.Timber
 
 @SuppressLint("ViewConstructor")
 class InputView(
@@ -98,6 +99,9 @@ class InputView(
         setOnClickListener(placeholderOnClickListener)
     }
 
+    // 同步标志，防止无限循环
+    private var isSyncing = false
+
     // 用于显示当前EditText内容的EditText
     private val currentContentEditText = editText {
         hint = ""
@@ -113,6 +117,18 @@ class InputView(
         drawable.setColor(0xFF17171A.toInt()) // 背景色#17171A
 //        drawable.cornerRadius = 0f // 去除圆角
         background = drawable
+        
+        // 添加文本变化监听器，实时同步到目标输入框
+        addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                // 当EditText内容改变时，同步到目标输入框（避免循环同步）
+                if (!isSyncing) {
+                    syncToTargetInputField()
+                }
+            }
+        })
     }
 
     // EditText左端填充矩形 - 与EditText同高度，背景色#17171A
@@ -159,7 +175,8 @@ class InputView(
         drawable.cornerRadius = dp(17).toFloat() // 17px圆角
         background = drawable
         setOnClickListener {
-            service.handleInputButtonClick()
+            // 执行回车键操作，handleReturnKey方法中已包含隐藏键盘的逻辑
+            service.handleReturnKey()
         }
     }
 
@@ -430,6 +447,8 @@ class InputView(
         if (focusChangeResetKeyboard || !restarting) {
             windowManager.attachWindow(KeyboardWindow)
         }
+        // 初始同步目标输入框内容到顶端EditText
+        syncFromTargetInputField()
     }
 
     override fun handleFcitxEvent(it: FcitxEvent<*>) {
@@ -487,6 +506,84 @@ class InputView(
         currentContentEditText.setText("")
     }
 
+    /**
+     * 同步目标输入框的内容到当前EditText
+     */
+    fun syncFromTargetInputField() {
+        if (isSyncing) return
+        
+        isSyncing = true
+        try {
+            val targetContent = service.getTargetInputFieldContent()
+            val cursorPosition = service.getTargetInputFieldCursorPosition()
+            
+            // 检查内容长度，避免过长内容
+            if (targetContent.length > 5000) {
+                Timber.w("Target content too long (${targetContent.length}), truncating to 5000 chars")
+                val truncatedContent = targetContent.substring(0, 5000)
+                currentContentEditText.setText(truncatedContent)
+                currentContentEditText.setSelection(minOf(cursorPosition, truncatedContent.length))
+            } else {
+                // 只有当内容不同时才更新，避免不必要的操作
+                if (currentContentEditText.text.toString() != targetContent) {
+                    currentContentEditText.setText(targetContent)
+                    
+                    // 设置光标位置，确保不超出文本长度
+                    val safePosition = minOf(cursorPosition, targetContent.length)
+                    currentContentEditText.setSelection(safePosition)
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w("Failed to sync from target input field: ${e.message}")
+        } finally {
+            isSyncing = false
+        }
+    }
+
+    /**
+     * 将当前EditText的内容同步到目标输入框
+     */
+    fun syncToTargetInputField() {
+        if (isSyncing) return
+        
+        val currentText = getCurrentContent()
+        val cursorPosition = currentContentEditText.selectionStart
+        
+        // 检查内容长度，避免过长内容
+        if (currentText.length > 5000) {
+            Timber.w("Current content too long (${currentText.length}), skipping sync")
+            return
+        }
+        
+        // 获取目标输入框的当前内容
+        val targetContent = service.getTargetInputFieldContent()
+        
+        // 如果内容不同，则需要同步
+        if (currentText != targetContent) {
+            val ic = service.currentInputConnection ?: return
+            
+            isSyncing = true
+            try {
+                ic.beginBatchEdit()
+                
+                // 选择所有文本
+                ic.setSelection(0, targetContent.length)
+                
+                // 替换为新内容
+                ic.commitText(currentText, 1)
+                
+                // 设置光标位置
+                val safePosition = minOf(cursorPosition, currentText.length)
+                ic.setSelection(safePosition, safePosition)
+                
+                ic.endBatchEdit()
+            } catch (e: Exception) {
+                Timber.w("Failed to sync to target input field: ${e.message}")
+            } finally {
+                isSyncing = false
+            }
+        }
+    }
 
     override fun onDetachedFromWindow() {
         keyboardPrefs.unregisterOnChangeListener(onKeyboardSizeChangeListener)
