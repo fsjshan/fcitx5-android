@@ -101,34 +101,46 @@ class InputView(
 
     // 同步标志，防止无限循环
     private var isSyncing = false
+    
+    // 密码输入框状态跟踪
+    private var isPasswordFieldCleared = false  // 标记密码输入框是否已被清空
 
     // 用于显示当前EditText内容的EditText
-    private val currentContentEditText = editText {
-        hint = ""
-        isEnabled = true
-        isFocusable = true
-        isFocusableInTouchMode = true
-        setPadding(dp(16), dp(12), dp(16), dp(12))
-        textSize = 18f
-        setTextColor(0xFFFFFFFF.toInt()) // 白色文字
-        setHintTextColor(0xFF888888.toInt()) // 灰色提示文字
-        // 设置背景色为#17171A，去除圆角
-        val drawable = android.graphics.drawable.GradientDrawable()
-        drawable.setColor(0xFF17171A.toInt()) // 背景色#17171A
-//        drawable.cornerRadius = 0f // 去除圆角
-        background = drawable
-        
-        // 添加文本变化监听器，实时同步到目标输入框
-        addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) {
-                // 当EditText内容改变时，同步到目标输入框（避免循环同步）
-                if (!isSyncing) {
-                    syncToTargetInputField()
+    private val currentContentEditText = object : androidx.appcompat.widget.AppCompatEditText(context) {
+        init {
+            hint = ""
+            isEnabled = true
+            isFocusable = true
+            isFocusableInTouchMode = true
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            textSize = 18f
+            setTextColor(0xFFFFFFFF.toInt()) // 白色文字
+            setHintTextColor(0xFF888888.toInt()) // 灰色提示文字
+            // 设置背景色为#17171A，去除圆角
+            val drawable = android.graphics.drawable.GradientDrawable()
+            drawable.setColor(0xFF17171A.toInt()) // 背景色#17171A
+            background = drawable
+            
+            // 添加文本变化监听器，实时同步到目标输入框
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    // 当EditText内容改变时，同步到目标输入框（避免循环同步）
+                    if (!isSyncing) {
+                        syncToTargetInputField()
+                    }
                 }
+            })
+        }
+        
+        override fun onSelectionChanged(selStart: Int, selEnd: Int) {
+            super.onSelectionChanged(selStart, selEnd)
+            // 当光标位置改变时，同步光标位置到目标输入框（避免循环同步）
+            if (!isSyncing) {
+                syncCursorToTargetInputField(selStart, selEnd)
             }
-        })
+        }
     }
 
     // EditText左端填充矩形 - 与EditText同高度，背景色#17171A
@@ -496,7 +508,7 @@ class InputView(
      * 获取当前内容EditText中的文本
      */
     fun getCurrentContent(): String {
-        return currentContentEditText.text.toString()
+        return currentContentEditText.text?.toString() ?: ""
     }
 
     /**
@@ -507,25 +519,93 @@ class InputView(
     }
 
     /**
+     * 重置密码输入框状态，在切换到新的输入框时调用
+     */
+    fun resetPasswordFieldState() {
+        isPasswordFieldCleared = false
+        Timber.d("Password field state reset")
+    }
+
+    /**
      * 同步目标输入框的内容到当前EditText
+     * 对于密码输入框，实现一次性清空和明文同步
      */
     fun syncFromTargetInputField() {
         if (isSyncing) return
         
         isSyncing = true
         try {
+            // 对于密码输入框的特殊处理
+            if (service.isPasswordInputType()) {
+                // 只在首次进入密码输入框时清空一次
+                if (!isPasswordFieldCleared) {
+                    Timber.d("First time entering password field, clearing content")
+                    
+                    // 清空目标输入框的内容（一次性操作）
+                    val ic = service.currentInputConnection
+                    if (ic != null) {
+                        try {
+                            ic.beginBatchEdit()
+                            // 获取当前文本长度并选择所有内容
+                            val beforeCursor = ic.getTextBeforeCursor(1000, 0)?.length ?: 0
+                            val afterCursor = ic.getTextAfterCursor(1000, 0)?.length ?: 0
+                            val totalLength = beforeCursor + afterCursor
+                            
+                            // 选择所有文本并清空
+                            ic.setSelection(0, totalLength)
+                            ic.commitText("", 1)
+                            ic.endBatchEdit()
+                        } catch (e: Exception) {
+                            Timber.w("Failed to clear password field: ${e.message}")
+                        }
+                    }
+                    
+                    // 清空顶端EditText和密码缓存
+                    currentContentEditText.setText("")
+                    currentContentEditText.setSelection(0)
+                    service.clearPasswordCache()
+                    
+                    // 标记已清空，避免重复清空
+                    isPasswordFieldCleared = true
+                    Timber.d("Password field cleared once, ready for input")
+                    return
+                }
+                
+                // 后续输入时，正常同步密码明文到顶端EditText
+                val targetContent = service.getTargetInputFieldContent()  // 这会返回明文
+                val cursorPosition = service.getTargetInputFieldCursorPosition()
+                
+                // 检查内容长度，避免过长内容
+                if (targetContent.length > 2000) {
+                    Timber.w("Password content too long (${targetContent.length}), truncating to 2000 chars")
+                    val truncatedContent = targetContent.substring(0, 2000)
+                    currentContentEditText.setText(truncatedContent)
+                    currentContentEditText.setSelection(minOf(cursorPosition, truncatedContent.length))
+                } else {
+                    // 同步密码明文到顶端EditText
+                    if (currentContentEditText.text?.toString() != targetContent) {
+                        currentContentEditText.setText(targetContent)
+                        val safePosition = minOf(cursorPosition, targetContent.length)
+                        currentContentEditText.setSelection(safePosition)
+                        Timber.d("Password plaintext synced to EditText: ${targetContent.length} chars")
+                    }
+                }
+                return
+            }
+            
+            // 非密码输入框的正常同步逻辑
             val targetContent = service.getTargetInputFieldContent()
             val cursorPosition = service.getTargetInputFieldCursorPosition()
             
             // 检查内容长度，避免过长内容
-            if (targetContent.length > 5000) {
-                Timber.w("Target content too long (${targetContent.length}), truncating to 5000 chars")
-                val truncatedContent = targetContent.substring(0, 5000)
+            if (targetContent.length > 2000) {
+                Timber.w("Target content too long (${targetContent.length}), truncating to 2000 chars")
+                val truncatedContent = targetContent.substring(0, 2000)
                 currentContentEditText.setText(truncatedContent)
                 currentContentEditText.setSelection(minOf(cursorPosition, truncatedContent.length))
             } else {
-                // 只有当内容不同时才更新，避免不必要的操作
-                if (currentContentEditText.text.toString() != targetContent) {
+                // 非密码框，正常内容比较
+                if (currentContentEditText.text?.toString() != targetContent) {
                     currentContentEditText.setText(targetContent)
                     
                     // 设置光标位置，确保不超出文本长度
@@ -549,8 +629,8 @@ class InputView(
         val currentText = getCurrentContent()
         val cursorPosition = currentContentEditText.selectionStart
         
-        // 检查内容长度，避免过长内容
-        if (currentText.length > 5000) {
+        // 检查内容长度，避免过长内容，使用更保守的限制
+        if (currentText.length > 2000) {
             Timber.w("Current content too long (${currentText.length}), skipping sync")
             return
         }
@@ -582,6 +662,35 @@ class InputView(
             } finally {
                 isSyncing = false
             }
+        }
+    }
+
+    /**
+     * 将当前EditText的光标位置同步到目标输入框
+     * 实现光标位置的反向同步 - 以顶端EditText为主导
+     */
+    fun syncCursorToTargetInputField(selStart: Int, selEnd: Int) {
+        if (isSyncing) return
+        
+        val ic = service.currentInputConnection ?: return
+        
+        // 获取目标输入框的当前内容长度，确保光标位置不超出范围
+        val targetContent = service.getTargetInputFieldContent()
+        val maxPosition = targetContent.length
+        
+        // 确保光标位置在有效范围内
+        val safeSelStart = minOf(selStart, maxPosition)
+        val safeSelEnd = minOf(selEnd, maxPosition)
+        
+        isSyncing = true
+        try {
+            // 同步光标位置到目标输入框
+            ic.setSelection(safeSelStart, safeSelEnd)
+            Timber.d("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd")
+        } catch (e: Exception) {
+            Timber.w("Failed to sync cursor to target input field: ${e.message}")
+        } finally {
+            isSyncing = false
         }
     }
 
