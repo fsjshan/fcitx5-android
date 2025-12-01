@@ -109,6 +109,10 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     private val composing = CursorRange()
     private var composingText = FormattedText.Empty
 
+    // 密码输入相关
+    private var isPasswordField = false
+    private var plaintextPassword = StringBuilder()
+
     private fun resetComposingState() {
         composing.clear()
         composingText = FormattedText.Empty
@@ -279,6 +283,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     private fun handleDeleteSurrounding(before: Int, after: Int) {
         val ic = currentInputConnection ?: return
+        
+        // 如果是密码输入框，跟踪明文密码删除
+        if (isPasswordInputType()) {
+            deleteTextFromPassword(before, after)
+        }
+        
         if (before > 0) {
             selection.predictOffset(-before)
         }
@@ -298,6 +308,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         } else if (lastSelection.start > 0) {
             selection.predictOffset(-1)
         }
+        
+        // 对于密码输入框，在删除前更新密码缓存
+        if (isPasswordInputType()) {
+            handlePasswordBackspace(lastSelection)
+        }
+        
         // In practice nobody (apart form ourselves) would set `privateImeOptions` to our
         // `DeleteSurroundingFlag`, leading to a behavior of simulating backspace key pressing
         // in almost every EditText.
@@ -326,6 +342,36 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         }
         // 同步到顶端EditText
         syncToTopEditText()
+    }
+    
+    /**
+     * 处理密码输入框的退格删除操作
+     */
+    private fun handlePasswordBackspace(selection: CursorRange) {
+        try {
+            if (selection.isNotEmpty()) {
+                // 有选中内容，删除选中范围
+                val startPos = selection.start
+                val endPos = selection.end
+                if (startPos >= 0 && startPos < cachedPlaintextPassword.length && endPos <= cachedPlaintextPassword.length) {
+                    cachedPlaintextPassword = cachedPlaintextPassword.removeRange(startPos, endPos)
+                    passwordCursorPosition = startPos
+                    Timber.d("Password backspace: removed selection from $startPos to $endPos")
+                }
+            } else {
+                // 无选中内容，删除光标前一个字符
+                val cursorPos = selection.start
+                if (cursorPos > 0 && cursorPos <= cachedPlaintextPassword.length) {
+                    cachedPlaintextPassword = cachedPlaintextPassword.removeRange(cursorPos - 1, cursorPos)
+                    passwordCursorPosition = cursorPos - 1
+                    Timber.d("Password backspace: removed character at position ${cursorPos - 1}")
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w("Failed to handle password backspace: ${e.message}")
+            // 如果处理失败，清空缓存以避免不一致
+            clearPasswordCache()
+        }
     }
 
     fun handleReturnKey() {
@@ -366,6 +412,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     fun commitText(text: String, cursor: Int = -1) {
         val ic = currentInputConnection ?: return
+        
+        // 如果是密码输入框，跟踪明文密码
+        if (isPasswordInputType()) {
+            insertTextInPassword(text)
+        }
+        
         // when composing text equals commit content, finish composing text as-is
         if (composing.isNotEmpty() && composingText.toString() == text) {
             val c = if (cursor == -1) text.length else cursor
@@ -436,8 +488,43 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     fun deleteSelection() {
         val lastSelection = selection.latest
         if (lastSelection.isEmpty()) return
+        
+        // 对于密码输入框，需要特殊处理删除操作
+        if (isPasswordInputType()) {
+            handlePasswordDeletion(lastSelection)
+        }
+        
         selection.predict(lastSelection.start)
         currentInputConnection?.commitText("", 1)
+        
+        // 删除操作后同步到顶端EditText
+        syncToTopEditText()
+    }
+    
+    /**
+     * 处理密码输入框的删除操作
+     */
+    private fun handlePasswordDeletion(selection: CursorRange) {
+        try {
+            val deleteLength = selection.end - selection.start
+            if (deleteLength <= 0) return
+            
+            // 更新密码缓存：删除对应位置的字符
+            val startPos = selection.start
+            if (startPos >= 0 && startPos < cachedPlaintextPassword.length) {
+                val endPos = minOf(selection.end, cachedPlaintextPassword.length)
+                cachedPlaintextPassword = cachedPlaintextPassword.removeRange(startPos, endPos)
+                
+                // 更新光标位置
+                passwordCursorPosition = startPos
+                
+                Timber.d("Password deletion: removed ${endPos - startPos} characters at position $startPos")
+            }
+        } catch (e: Exception) {
+            Timber.w("Failed to handle password deletion: ${e.message}")
+            // 如果处理失败，清空缓存以避免不一致
+            clearPasswordCache()
+        }
     }
 
     fun sendCombinationKeyEvents(
@@ -482,26 +569,74 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     /**
      * 获取目标输入框的完整文本内容
+     * 对于密码输入框，返回明文而不是掩码
      */
     fun getTargetInputFieldContent(): String {
         val ic = currentInputConnection ?: return ""
         return try {
-            // 使用合理的最大长度限制，避免内存溢出
-            val maxLength = 10000 // 限制为10000字符
+            // 检测是否为密码输入框
+            val isPassword = isPasswordInputType()
             
-            // 获取光标前的文本
-            val beforeCursor = ic.getTextBeforeCursor(maxLength, 0)?.toString() ?: ""
-            // 获取光标后的文本
-            val afterCursor = ic.getTextAfterCursor(maxLength, 0)?.toString() ?: ""
-            // 获取当前选中的文本
-            val selectedText = ic.getSelectedText(0)?.toString() ?: ""
+            if (isPassword) {
+                // 对于密码输入框，我们需要维护明文密码
+                // 由于无法直接获取密码明文，我们通过跟踪输入来维护
+                return getPlaintextPassword()
+            }
             
-            // 如果有选中文本，则返回 beforeCursor + selectedText + afterCursor
-            // 如果没有选中文本，则返回 beforeCursor + afterCursor
-            if (selectedText.isNotEmpty()) {
+            // 使用更保守的最大长度限制，避免内存溢出
+            val maxLength = 1000 // 进一步限制为1000字符，避免内存问题
+            
+            // 获取光标前的文本，添加额外的长度检查
+            val beforeCursor = try {
+                val text = ic.getTextBeforeCursor(maxLength, 0)?.toString() ?: ""
+                if (text.length > maxLength) {
+                    text.substring(0, maxLength)
+                } else {
+                    text
+                }
+            } catch (e: Exception) {
+                Timber.w("Failed to get text before cursor: ${e.message}")
+                ""
+            }
+            
+            // 获取光标后的文本，添加额外的长度检查
+            val afterCursor = try {
+                val text = ic.getTextAfterCursor(maxLength, 0)?.toString() ?: ""
+                if (text.length > maxLength) {
+                    text.substring(0, maxLength)
+                } else {
+                    text
+                }
+            } catch (e: Exception) {
+                Timber.w("Failed to get text after cursor: ${e.message}")
+                ""
+            }
+            
+            // 获取当前选中的文本，添加长度检查
+            val selectedText = try {
+                val text = ic.getSelectedText(0)?.toString() ?: ""
+                if (text.length > maxLength) {
+                    text.substring(0, maxLength)
+                } else {
+                    text
+                }
+            } catch (e: Exception) {
+                Timber.w("Failed to get selected text: ${e.message}")
+                ""
+            }
+            
+            // 组合文本，并确保总长度不超过限制
+            val combinedText = if (selectedText.isNotEmpty()) {
                 beforeCursor + selectedText + afterCursor
             } else {
                 beforeCursor + afterCursor
+            }
+            
+            // 最终长度检查，确保不会导致内存问题
+            if (combinedText.length > maxLength * 2) {
+                combinedText.substring(0, maxLength * 2)
+            } else {
+                combinedText
             }
         } catch (e: Exception) {
             Timber.w("Failed to get target input field content: ${e.message}")
@@ -515,9 +650,19 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     fun getTargetInputFieldCursorPosition(): Int {
         val ic = currentInputConnection ?: return 0
         return try {
-            // 使用合理的最大长度限制
-            val maxLength = 10000
-            val beforeCursor = ic.getTextBeforeCursor(maxLength, 0)?.toString() ?: ""
+            // 使用更保守的最大长度限制
+            val maxLength = 1000
+            val beforeCursor = try {
+                val text = ic.getTextBeforeCursor(maxLength, 0)?.toString() ?: ""
+                if (text.length > maxLength) {
+                    text.substring(0, maxLength)
+                } else {
+                    text
+                }
+            } catch (e: Exception) {
+                Timber.w("Failed to get text before cursor for position: ${e.message}")
+                ""
+            }
             beforeCursor.length
         } catch (e: Exception) {
             Timber.w("Failed to get target input field cursor position: ${e.message}")
@@ -530,9 +675,158 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
      */
     private fun syncToTopEditText() {
         try {
+            // 对于密码输入框，添加额外的保护检查
+            if (isPasswordInputType()) {
+                checkPasswordCacheSize()
+            }
             inputView?.syncFromTargetInputField()
         } catch (e: Exception) {
             Timber.w("Failed to sync to top EditText: ${e.message}")
+        }
+    }
+
+    /**
+     * 检测当前输入框是否为密码输入框
+     */
+    fun isPasswordInputType(): Boolean {
+        val inputType = currentInputEditorInfo.inputType
+        return (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+               (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
+               (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
+               (inputType and InputType.TYPE_NUMBER_VARIATION_PASSWORD) == InputType.TYPE_NUMBER_VARIATION_PASSWORD
+    }
+
+    // 密码管理相关变量和方法
+    private var cachedPlaintextPassword = ""
+    private var passwordCursorPosition = 0
+    
+    // 密码长度监控
+    private var lastPasswordLengthCheck = 0L
+    private val PASSWORD_LENGTH_CHECK_INTERVAL = 5000L // 5秒检查一次
+    
+    /**
+     * 检查密码缓存长度，防止异常增长
+     */
+    private fun checkPasswordCacheSize() {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastPasswordLengthCheck < PASSWORD_LENGTH_CHECK_INTERVAL) {
+            return
+        }
+        lastPasswordLengthCheck = currentTime
+        
+        if (cachedPlaintextPassword.length > 10000) {
+            Timber.w("Password cache size exceeded limit (${cachedPlaintextPassword.length}), clearing cache")
+            clearPasswordCache()
+        }
+    }
+
+    /**
+     * 获取明文密码
+     */
+    private fun getPlaintextPassword(): String {
+        // 定期检查密码缓存大小
+        checkPasswordCacheSize()
+        return cachedPlaintextPassword
+    }
+
+    /**
+     * 更新明文密码缓存
+     */
+    private fun updatePlaintextPassword(newText: String) {
+        cachedPlaintextPassword = newText
+        passwordCursorPosition = newText.length
+    }
+
+    /**
+     * 在密码中插入文本
+     */
+    private fun insertTextInPassword(text: String) {
+        // 防止OOM：限制输入文本长度
+        val safeText = if (text.length > 100) {
+            Timber.w("Input text too long (${text.length}), truncating to 100 chars")
+            text.substring(0, 100)
+        } else {
+            text
+        }
+        
+        // 防止OOM：检查结果长度
+        val newLength = cachedPlaintextPassword.length + safeText.length
+        if (newLength > 10000) {
+            Timber.w("Password would exceed limit after insertion ($newLength), clearing cache")
+            clearPasswordCache()
+            cachedPlaintextPassword = safeText
+            passwordCursorPosition = safeText.length
+            return
+        }
+        
+        // 使用StringBuilder避免多次字符串拼接
+        val sb = StringBuilder(cachedPlaintextPassword.length + safeText.length)
+        if (passwordCursorPosition > 0) {
+            sb.append(cachedPlaintextPassword.substring(0, passwordCursorPosition))
+        }
+        sb.append(safeText)
+        if (passwordCursorPosition < cachedPlaintextPassword.length) {
+            sb.append(cachedPlaintextPassword.substring(passwordCursorPosition))
+        }
+        
+        cachedPlaintextPassword = sb.toString()
+        passwordCursorPosition += safeText.length
+    }
+
+    /**
+     * 从密码中删除文本
+     */
+    private fun deleteTextFromPassword(before: Int, after: Int) {
+        val start = maxOf(0, passwordCursorPosition - before)
+        val end = minOf(cachedPlaintextPassword.length, passwordCursorPosition + after)
+        
+        val beforeDelete = cachedPlaintextPassword.substring(0, start)
+        val afterDelete = cachedPlaintextPassword.substring(end)
+        
+        cachedPlaintextPassword = beforeDelete + afterDelete
+        passwordCursorPosition = start
+    }
+
+    /**
+     * 清空密码缓存
+     */
+    /**
+     * 清空密码缓存（公共方法，供InputView调用）
+     */
+    fun clearPasswordCache() {
+        cachedPlaintextPassword = ""
+        passwordCursorPosition = 0
+        Timber.d("Password cache cleared")
+    }
+
+    /**
+     * 从现有密码输入框内容初始化密码缓存
+     * 对于已有内容的密码输入框，我们无法获取明文，但可以根据掩码长度推断密码长度
+     */
+    private fun initializePasswordCacheFromExistingContent() {
+        val ic = currentInputConnection ?: return
+        try {
+            // 获取密码输入框的掩码内容
+            val maxLength = 1000 // 合理的最大长度
+            val beforeCursor = ic.getTextBeforeCursor(maxLength, 0)?.toString() ?: ""
+            val afterCursor = ic.getTextAfterCursor(maxLength, 0)?.toString() ?: ""
+            val selectedText = ic.getSelectedText(0)?.toString() ?: ""
+            
+            // 计算总长度
+            val totalLength = beforeCursor.length + afterCursor.length + selectedText.length
+            val cursorPos = beforeCursor.length
+            
+            if (totalLength > 0) {
+                // 创建占位符明文，用户后续输入时会逐步替换
+                cachedPlaintextPassword = "•".repeat(totalLength)
+                passwordCursorPosition = cursorPos
+                
+                Timber.d("Initialized password cache with $totalLength placeholder characters, cursor at $cursorPos")
+            }
+        } catch (e: Exception) {
+            Timber.w("Failed to initialize password cache from existing content: ${e.message}")
+            // 如果出错，保持空缓存
+            clearPasswordCache()
         }
     }
 
@@ -733,6 +1027,18 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         // right cursor position, try to workaround this would simply introduce more bugs.
         selection.resetTo(attribute.initialSelStart, attribute.initialSelEnd)
         resetComposingState()
+        
+        // 清空密码缓存，准备处理新的输入框
+        clearPasswordCache()
+        
+        // 重置密码输入框状态，准备处理新的输入框
+        inputView?.resetPasswordFieldState()
+        
+        // 如果是密码输入框且已有内容，初始化密码缓存
+        if (isPasswordInputType()) {
+            initializePasswordCacheFromExistingContent()
+        }
+        
         val flags = CapabilityFlags.fromEditorInfo(attribute)
         capabilityFlags = flags
         Timber.d("onStartInput: initialSel=${selection.current}, restarting=$restarting")
