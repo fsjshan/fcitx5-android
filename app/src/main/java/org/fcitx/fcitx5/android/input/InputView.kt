@@ -155,8 +155,9 @@ class InputView(
         
         override fun onSelectionChanged(selStart: Int, selEnd: Int) {
             super.onSelectionChanged(selStart, selEnd)
-            // 当光标位置改变时，同步光标位置到目标输入框（避免循环同步）
+            // 当光标位置改变时，立即同步光标位置到目标输入框（避免循环同步）
             if (!isSyncing) {
+                // 立即同步光标位置，避免滞后
                 syncCursorToTargetInputField(selStart, selEnd)
             }
         }
@@ -536,6 +537,8 @@ class InputView(
 
     fun updateSelection(start: Int, end: Int) {
         broadcaster.onSelectionUpdate(start, end)
+        // 同步目标输入框的光标位置到EditText
+        syncFromTargetInputField()
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
@@ -555,7 +558,12 @@ class InputView(
      * 获取当前内容EditText中的文本
      */
     fun getCurrentContent(): String {
-        return currentContentEditText.text?.toString() ?: ""
+        return try {
+            currentContentEditText.text?.toString() ?: ""
+        } catch (e: Exception) {
+            Timber.w("Failed to get current content: ${e.message}")
+            ""
+        }
     }
 
     /**
@@ -629,12 +637,20 @@ class InputView(
                     currentContentEditText.setText(truncatedContent)
                     currentContentEditText.setSelection(minOf(cursorPosition, truncatedContent.length))
                 } else {
-                    // 同步密码明文到顶端EditText
-                    if (currentContentEditText.text?.toString() != targetContent) {
+                    // 同步密码明文到顶端EditText，确保内容和光标位置都正确同步
+                    val currentEditTextContent = currentContentEditText.text?.toString() ?: ""
+                    val currentEditTextCursor = try {
+                        currentContentEditText.selectionStart
+                    } catch (e: Exception) {
+                        0
+                    }
+                    
+                    // 检查内容或光标位置是否需要同步
+                    if (currentEditTextContent != targetContent || currentEditTextCursor != cursorPosition) {
                         currentContentEditText.setText(targetContent)
-                        val safePosition = minOf(cursorPosition, targetContent.length)
+                        val safePosition = minOf(maxOf(cursorPosition, 0), targetContent.length)
                         currentContentEditText.setSelection(safePosition)
-                        Timber.d("Password plaintext synced to EditText: ${targetContent.length} chars")
+                        Timber.d("Password plaintext synced to EditText: content=${targetContent.length} chars, cursor=$safePosition")
                     }
                 }
                 return
@@ -673,42 +689,48 @@ class InputView(
     fun syncToTargetInputField() {
         if (isSyncing) return
         
-        val currentText = getCurrentContent()
-        val cursorPosition = currentContentEditText.selectionStart
-        
-        // 检查内容长度，避免过长内容，使用更保守的限制
-        if (currentText.length > 2000) {
-            Timber.w("Current content too long (${currentText.length}), skipping sync")
-            return
-        }
-        
-        // 获取目标输入框的当前内容
-        val targetContent = service.getTargetInputFieldContent()
-        
-        // 如果内容不同，则需要同步
-        if (currentText != targetContent) {
-            val ic = service.currentInputConnection ?: return
-            
-            isSyncing = true
-            try {
-                ic.beginBatchEdit()
-                
-                // 选择所有文本
-                ic.setSelection(0, targetContent.length)
-                
-                // 替换为新内容
-                ic.commitText(currentText, 1)
-                
-                // 设置光标位置
-                val safePosition = minOf(cursorPosition, currentText.length)
-                ic.setSelection(safePosition, safePosition)
-                
-                ic.endBatchEdit()
+        try {
+            val currentText = getCurrentContent()
+            val cursorPosition = try {
+                currentContentEditText.selectionStart
             } catch (e: Exception) {
-                Timber.w("Failed to sync to target input field: ${e.message}")
-            } finally {
-                isSyncing = false
+                0 // 默认光标位置为0
             }
+            
+            // 检查内容长度，避免过长内容，使用更保守的限制
+            if (currentText.length > 2000) {
+                Timber.w("Current content too long (${currentText.length}), skipping sync")
+                return
+            }
+            
+            // 获取目标输入框的当前内容
+            val targetContent = service.getTargetInputFieldContent()
+            
+            // 如果内容不同，则需要同步
+            if (currentText != targetContent) {
+                val ic = service.currentInputConnection ?: return
+                
+                isSyncing = true
+                try {
+                    ic.beginBatchEdit()
+                    
+                    // 选择所有文本并替换
+                    ic.setSelection(0, targetContent.length)
+                    ic.commitText(currentText, 0)
+                    
+                    // 设置光标位置，确保在有效范围内
+                    val safePosition = minOf(maxOf(cursorPosition, 0), currentText.length)
+                    ic.setSelection(safePosition, safePosition)
+                    
+                    ic.endBatchEdit()
+                } catch (e: Exception) {
+                    Timber.w("Failed to sync to target input field: ${e.message}")
+                } finally {
+                    isSyncing = false
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w("Error in syncToTargetInputField: ${e.message}")
         }
     }
 
@@ -721,25 +743,39 @@ class InputView(
         
         val ic = service.currentInputConnection ?: return
         
-        // 获取目标输入框的当前内容长度，确保光标位置不超出范围
-        val targetContent = service.getTargetInputFieldContent()
-        val maxPosition = targetContent.length
-        
-        // 确保光标位置在有效范围内
-        val safeSelStart = minOf(selStart, maxPosition)
-        val safeSelEnd = minOf(selEnd, maxPosition)
-        
-        isSyncing = true
         try {
-            // 同步光标位置到目标输入框
-            ic.setSelection(safeSelStart, safeSelEnd)
-            Timber.d("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd")
+            // 获取目标输入框的实际内容长度，考虑多行文本场景
+            val targetContent = service.getTargetInputFieldContent()
+            val currentText = getCurrentContent()
+            
+            // 使用目标输入框的实际内容长度作为最大位置限制
+            val maxPosition = targetContent.length
+            
+            // 确保光标位置在有效范围内，同时考虑单行EditText与多行目标输入框的差异
+            val safeSelStart = minOf(maxOf(selStart, 0), maxPosition)
+            val safeSelEnd = minOf(maxOf(selEnd, 0), maxPosition)
+            
+            // 验证内容一致性，如果不一致则跳过光标同步
+            if (currentText != targetContent) {
+                Timber.d("Content mismatch, skipping cursor sync: current=${currentText.length}, target=${targetContent.length}")
+                return
+            }
+            
+            isSyncing = true
+            try {
+                // 同步光标位置到目标输入框
+                ic.setSelection(safeSelStart, safeSelEnd)
+                Timber.d("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd (targetLen=${targetContent.length}, currentLen=${currentText.length})")
+            } catch (e: Exception) {
+                Timber.w("Failed to sync cursor to target input field: ${e.message}")
+            } finally {
+                isSyncing = false
+            }
         } catch (e: Exception) {
-            Timber.w("Failed to sync cursor to target input field: ${e.message}")
-        } finally {
-            isSyncing = false
+            Timber.w("Error in syncCursorToTargetInputField: ${e.message}")
         }
     }
+
 
     override fun onDetachedFromWindow() {
         keyboardPrefs.unregisterOnChangeListener(onKeyboardSizeChangeListener)
