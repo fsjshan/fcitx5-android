@@ -10,7 +10,14 @@
         <item name="colorLogVerbose">@color/grey_700</item>
     </style>
 
-    <style name="Theme.InputViewTheme" parent="@android:style/Theme.DeviceDefault.Settings" />
+    <style name="Theme.InputViewTheme" parent="@android:style/Theme.DeviceDefault.Settings">
+        <item name="android:colorAccent">#0080ff</item>
+        <item name="android:colorPrimary">#0080ff</item>
+        <item name="android:textColorHighlight">#660080ff</item>
+        <item name="android:textSelectHandle">@drawable/text_select_handle_middle_blue</item>
+        <item name="android:textSelectHandleLeft">@drawable/text_select_handle_left_blue</item>
+        <item name="android:textSelectHandleRight">@drawable/text_select_handle_right_blue</item>
+    </style>
 
     <style name="Theme.DialogTheme" parent="@android:style/Theme.DeviceDefault.Light.Dialog" />
 

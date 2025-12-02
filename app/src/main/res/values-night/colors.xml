@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Override colors for dark theme -->
+    <color name="genericActiveBackgroundColor">#ff0080ff</color>
+    <color name="genericActiveForegroundColor">#fffafafa</color>
+</resources>
