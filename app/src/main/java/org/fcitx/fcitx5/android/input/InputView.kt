@@ -140,6 +140,62 @@ class InputView(
                 // 忽略设置光标失败的错误，使用系统默认光标
             }
             
+            // 设置文本选中高亮背景色为40%透明的蓝色#0080ff
+            highlightColor = 0x660080ff.toInt() // 40%透明度的#0080ff蓝色
+            
+            // 通过反射强制设置文本选择手柄为水滴形状
+            try {
+                // 获取我们创建的水滴形状drawable资源
+                val middleDrawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.text_select_handle_middle_blue)
+                val leftDrawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.text_select_handle_left_blue)
+                val rightDrawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.text_select_handle_right_blue)
+                
+                // 尝试通过反射设置选择手柄资源
+                val textViewClass = android.widget.TextView::class.java
+                
+                // 设置中间选择手柄（垂直水滴）
+                middleDrawable?.let { drawable ->
+                    val setTextSelectHandleMethod = textViewClass.getDeclaredMethod("setTextSelectHandle", android.graphics.drawable.Drawable::class.java)
+                    setTextSelectHandleMethod.isAccessible = true
+                    setTextSelectHandleMethod.invoke(this, drawable)
+                }
+                
+                // 设置左侧选择手柄（左倾水滴）
+                leftDrawable?.let { drawable ->
+                    val setTextSelectHandleLeftMethod = textViewClass.getDeclaredMethod("setTextSelectHandleLeft", android.graphics.drawable.Drawable::class.java)
+                    setTextSelectHandleLeftMethod.isAccessible = true
+                    setTextSelectHandleLeftMethod.invoke(this, drawable)
+                }
+                
+                // 设置右侧选择手柄（右倾水滴）
+                rightDrawable?.let { drawable ->
+                    val setTextSelectHandleRightMethod = textViewClass.getDeclaredMethod("setTextSelectHandleRight", android.graphics.drawable.Drawable::class.java)
+                    setTextSelectHandleRightMethod.isAccessible = true
+                    setTextSelectHandleRightMethod.invoke(this, drawable)
+                }
+            } catch (e: Exception) {
+                // 如果反射失败，尝试通过编辑器设置
+                try {
+                    val editorField = javaClass.superclass?.getDeclaredField("mEditor")
+                    editorField?.isAccessible = true
+                    val editor = editorField?.get(this)
+                    
+                    editor?.let { ed ->
+                        val editorClass = ed.javaClass
+                        // 尝试设置选择手柄颜色
+                        try {
+                            val colorField = editorClass.getDeclaredField("mTextSelectHandleColor")
+                            colorField.isAccessible = true
+                            colorField.set(ed, 0xFF0080FF.toInt())
+                        } catch (ex: Exception) {
+                            // 忽略字段设置失败
+                        }
+                    }
+                } catch (ex: Exception) {
+                    // 最后的备用方案：使用主题系统设置
+                }
+            }
+            
             // 添加文本变化监听器，实时同步到目标输入框
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}

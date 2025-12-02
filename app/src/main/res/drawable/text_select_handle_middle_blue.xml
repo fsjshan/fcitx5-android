@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="32dp"
+    android:viewportWidth="24"
+    android:viewportHeight="32">
+    <!-- 真实的水滴形状：使用贝塞尔曲线创建平滑的水滴轮廓 -->
+    <path
+        android:fillColor="#0080ff"
+        android:pathData="M12,4C12,4 2,8 2,15C2,20.5 6.5,24 12,24C17.5,24 22,20.5 22,15C22,8 12,4 12,4Z"/>
+</vector>

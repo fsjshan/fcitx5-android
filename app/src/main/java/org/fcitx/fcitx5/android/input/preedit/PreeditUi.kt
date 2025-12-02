@@ -41,7 +41,7 @@ open class PreeditUi(
     }
 
     private val cursorSpan by lazy {
-        CursorSpan(ctx, theme.keyTextColor, upView.paint.fontMetricsInt)
+        CursorSpan(ctx, 0xFF0080FF.toInt(), upView.paint.fontMetricsInt) // 使用#0080FF蓝色作为光标颜色
     }
 
     private fun createTextView() = textView {

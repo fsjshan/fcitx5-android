@@ -19,7 +19,7 @@
     <color name="keyShadowColor">#ff252525</color>
     <color name="spaceBarColor">#ff4a4a4a</color>
     <color name="clipboardEntryColor">#ff464646</color>
-    <color name="genericActiveBackgroundColor">#ff5e97f6</color>
+    <color name="genericActiveBackgroundColor">#ff0080ff</color>
     <color name="genericActiveForegroundColor">#fffafafa</color>
     <color name="keyboardColor1">#ff1a1a1a</color>
     <color name="panel">#ff2a2a2a</color>
