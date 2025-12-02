@@ -113,13 +113,32 @@ class InputView(
             isFocusable = true
             isFocusableInTouchMode = true
             setPadding(dp(16), dp(12), dp(16), dp(12))
-            textSize = 18f
+            textSize = 22f // 设置字号为22sp
             setTextColor(0xFFFFFFFF.toInt()) // 白色文字
             setHintTextColor(0xFF888888.toInt()) // 灰色提示文字
+            
+            // 设置单行显示，上下居中
+            setSingleLine(true)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            
             // 设置背景色为#17171A，去除圆角
             val drawable = android.graphics.drawable.GradientDrawable()
             drawable.setColor(0xFF17171A.toInt()) // 背景色#17171A
             background = drawable
+            
+            // 创建自定义光标drawable - #0080FF蓝色，4dp粗细
+            val cursorDrawable = android.graphics.drawable.GradientDrawable()
+            cursorDrawable.setColor(0xFF0080FF.toInt()) // #0080FF蓝色
+            cursorDrawable.setSize(dp(4), dp(20)) // 4dp宽度，20dp高度
+            
+            // 设置光标drawable - 仅使用公开API，兼容API 35+
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    textCursorDrawable = cursorDrawable
+                }
+            } catch (e: Exception) {
+                // 忽略设置光标失败的错误，使用系统默认光标
+            }
             
             // 添加文本变化监听器，实时同步到目标输入框
             addTextChangedListener(object : android.text.TextWatcher {
@@ -168,8 +187,36 @@ class InputView(
         drawable.cornerRadius = dp(17).toFloat() // 17px圆角
         background = drawable
         setOnClickListener {
-            // 清空内容并隐藏输入法
+            // 清空顶部EditText内容
             clearCurrentContent()
+            
+            // 清空目标输入框内容
+            val ic = service.currentInputConnection
+            if (ic != null) {
+                try {
+                    ic.beginBatchEdit()
+                    // 获取当前文本并删除所有内容
+                    val currentText = ic.getTextBeforeCursor(10000, 0) ?: ""
+                    val afterText = ic.getTextAfterCursor(10000, 0) ?: ""
+                    val totalLength = currentText.length + afterText.length
+                    
+                    if (totalLength > 0) {
+                        // 选择所有文本并删除
+                        ic.setSelection(0, totalLength)
+                        ic.deleteSurroundingText(0, totalLength)
+                    }
+                    ic.endBatchEdit()
+                    
+                    // 清空密码缓存
+                    service.clearPasswordCache()
+                    
+                    // 重置密码状态
+                    resetPasswordFieldState()
+                } catch (e: Exception) {
+                    Timber.w("Failed to clear target input field: ${e.message}")
+                }
+            }
+            
             service.requestHideSelf(0)
         }
     }
