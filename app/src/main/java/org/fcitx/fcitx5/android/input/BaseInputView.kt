@@ -5,6 +5,7 @@
 
 package org.fcitx.fcitx5.android.input
 
+import android.view.View
 import android.view.WindowInsets
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.view.WindowInsetsCompat
@@ -17,6 +18,15 @@ import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
 import org.fcitx.fcitx5.android.data.theme.ThemePrefs
 import org.fcitx.fcitx5.android.utils.navbarFrameHeight
+import splitties.views.dsl.constraintlayout.constraintLayout
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.topOfParent
+import splitties.views.dsl.constraintlayout.bottomOfParent
+import splitties.views.dsl.constraintlayout.startOfParent
+import splitties.views.dsl.constraintlayout.endOfParent
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.view
+import splitties.views.dsl.core.matchParent
 import kotlin.math.max
 
 abstract class BaseInputView(
@@ -24,6 +34,21 @@ abstract class BaseInputView(
     val fcitx: FcitxConnection,
     val theme: Theme
 ) : ConstraintLayout(service) {
+
+    // 全屏背景层
+    private val fullScreenBackground = view(::View) {
+        setBackgroundColor(0xFF131314.toInt())
+    }
+
+    init {
+        // 添加全屏背景层作为第一个子视图，确保它在所有其他组件下方
+        add(fullScreenBackground, lParams(matchParent, matchParent) {
+            topOfParent()
+            bottomOfParent()
+            startOfParent()
+            endOfParent()
+        })
+    }
 
     protected abstract fun handleFcitxEvent(it: FcitxEvent<*>)
 
