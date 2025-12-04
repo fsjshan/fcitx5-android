@@ -134,12 +134,12 @@ abstract class BaseKeyboard(
             }
         }
         keyRows.forEachIndexed { index, row ->
-            add(row, lParams(matchParent, dp(66)) {
+            add(row, lParams(matchParent, dp(55)) {
                 if (index == 0) {
-                    topOfParent(dp(2))
+                    topOfParent(dp(4))
                 } else {
                     below(keyRows[index - 1])
-                    topMargin = dp(1) // 添加8dp行间距
+                    topMargin = dp(4) // 调整为4dp行间距
                 }
 //                if (index == keyRows.size - 1) bottomOfParent()
 //                else above(keyRows[index + 1])

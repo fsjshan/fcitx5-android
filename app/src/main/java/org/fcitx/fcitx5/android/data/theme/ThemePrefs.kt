@@ -66,10 +66,10 @@ class ThemePrefs(sharedPreferences: SharedPreferences) :
             R.string.key_vertical_margin,
             R.string.portrait,
             "key_vertical_margin",
-            5,
+            1,
             R.string.landscape,
             "key_vertical_margin_landscape",
-            3,
+            1,
             0,
             24,
             "dp"
