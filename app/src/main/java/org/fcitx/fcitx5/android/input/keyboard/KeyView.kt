@@ -402,7 +402,7 @@ class ImageTextKeyView(ctx: Context, theme: Theme, def: KeyDef.Appearance.ImageT
 
     init {
         appearanceView.apply {
-            add(img, lParams(dp(13), dp(13)))
+            add(img, lParams(dp(20), dp(20)))
         }
         mainText.updateLayoutParams<ConstraintLayout.LayoutParams> {
             centerHorizontally()
