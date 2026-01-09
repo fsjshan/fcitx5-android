@@ -62,7 +62,7 @@ class StatusAreaEntryUi(override val ctx: Context, private val theme: Theme) : U
     }
 
     val label = textView {
-        textSize = 12f
+        textSize = 16f
         gravity = gravityCenter
         setTextColor(theme.keyTextColor)
     }

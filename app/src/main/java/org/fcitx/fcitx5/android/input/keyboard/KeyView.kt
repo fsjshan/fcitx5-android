@@ -273,7 +273,7 @@ class AltTextKeyView(ctx: Context, theme: Theme, def: KeyDef.Appearance.AltText)
         isClickable = false
         isFocusable = false
         // TODO hardcoded alt text size
-        setTextSize(TypedValue.COMPLEX_UNIT_DIP, 10.666667f)
+        setTextSize(TypedValue.COMPLEX_UNIT_DIP, 20.00f)
         setTypeface(typeface, Typeface.BOLD)
         text = def.altText
         textDirection = View.TEXT_DIRECTION_FIRST_STRONG_LTR
@@ -402,7 +402,7 @@ class ImageTextKeyView(ctx: Context, theme: Theme, def: KeyDef.Appearance.ImageT
 
     init {
         appearanceView.apply {
-            add(img, lParams(dp(13), dp(13)))
+            add(img, lParams(dp(26), dp(26)))
         }
         mainText.updateLayoutParams<ConstraintLayout.LayoutParams> {
             centerHorizontally()

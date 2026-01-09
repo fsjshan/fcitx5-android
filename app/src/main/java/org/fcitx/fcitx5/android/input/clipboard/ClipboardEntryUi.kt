@@ -36,7 +36,7 @@ class ClipboardEntryUi(override val ctx: Context, private val theme: Theme, radi
     val textView = textView {
         minLines = 1
         maxLines = 4
-        textSize = 14f
+        textSize = 18.67f
         setPaddingDp(8, 4, 8, 4)
         ellipsize = TextUtils.TruncateAt.END
         setTextColor(theme.keyTextColor)

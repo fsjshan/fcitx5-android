@@ -46,7 +46,7 @@ open class PreeditUi(
 
     private fun createTextView() = textView {
         setTextColor(theme.keyTextColor)
-        textSize = 16f
+        textSize = 21.33f
         setupTextView?.invoke(this)
     }
 

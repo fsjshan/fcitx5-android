@@ -37,7 +37,7 @@ class TitleUi(override val ctx: Context, theme: Theme) : Ui {
         typeface = Typeface.defaultFromStyle(Typeface.BOLD)
         setTextColor(theme.altKeyTextColor)
         gravity = gravityVerticalCenter
-        textSize = 16f
+        textSize = 21.33f
     }
 
     private var extension: View? = null

@@ -20,7 +20,7 @@ class NumberRow(ctx: Context, theme: Theme) : BaseKeyboard(ctx, theme, Layout) {
                 KeyDef(
                     KeyDef.Appearance.Text(
                         displayText = digit,
-                        textSize = 21f,
+                        textSize = 24.89f,
                         border = KeyDef.Appearance.Border.Off,
                         margin = false
                     ),

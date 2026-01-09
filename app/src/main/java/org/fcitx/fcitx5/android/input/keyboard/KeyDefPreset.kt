@@ -26,7 +26,7 @@ class SymbolKey(
 ) : KeyDef(
     Appearance.Text(
         displayText = symbol,
-        textSize = 23f,
+        textSize = 30.67f,
         percentWidth = percentWidth,
         variant = variant
     ),
@@ -49,7 +49,7 @@ class AlphabetKey(
     Appearance.AltText(
         displayText = character,
         altText = punctuation,
-        textSize = 23f,
+        textSize = 30.67f,
         percentWidth = percentWidth,
         variant = variant
     ),
@@ -72,7 +72,7 @@ class AlphabetDigitKey(
     Appearance.AltText(
         displayText = character,
         altText = altText,
-        textSize = 23f
+        textSize = 30.67f
     ),
     setOf(
         Behavior.Press(KeyAction.FcitxKeyAction(character)),
@@ -117,7 +117,7 @@ class LayoutSwitchKey(
 ) : KeyDef(
     Appearance.Text(
         displayText,
-        textSize = 16f,
+        textSize = 21.33f,
         textStyle = Typeface.BOLD,
         percentWidth = percentWidth,
         variant = variant
@@ -162,7 +162,7 @@ class CommaKey(
 ) : KeyDef(
     Appearance.ImageText(
         displayText = ",",
-        textSize = 23f,
+        textSize = 30.67f,
         percentWidth = percentWidth,
         variant = variant,
         src = R.drawable.ic_baseline_tag_faces_24
@@ -209,7 +209,7 @@ class LanguageKey : KeyDef(
 class SpaceKey : KeyDef(
     Appearance.Text(
         displayText = " ",
-        textSize = 13f,
+        textSize = 17.33f,
         percentWidth = 0f,
         border = Border.Special,
         viewId = R.id.button_space,
@@ -291,7 +291,7 @@ class TextPickerSwitchKey(
 ) : KeyDef(
     Appearance.Text(
         displayText = text,
-        textSize = 16f,
+        textSize = 21.33f,
         percentWidth = percentWidth,
         variant = variant,
         viewId = viewId,

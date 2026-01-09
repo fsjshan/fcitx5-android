@@ -113,7 +113,7 @@ class InputView(
             isFocusable = true
             isFocusableInTouchMode = true
             setPadding(dp(16), dp(12), dp(16), dp(12))
-            textSize = 22f // 设置字号为22sp
+            textSize = 29.33f // 设置字号为29.33sp
             setTextColor(0xFFFFFFFF.toInt()) // 白色文字
             setHintTextColor(0xFF888888.toInt()) // 灰色提示文字
             
@@ -238,7 +238,7 @@ class InputView(
         text = "取消"
         setPadding(0, 0, 0, 0)
         setTextColor(0xCCFFFFFF.toInt()) // 白色文字
-        textSize = 17f
+        textSize = 14f
         val drawable = android.graphics.drawable.GradientDrawable()
         drawable.setColor(0xFF303033.toInt()) // 背景色#303033
         drawable.cornerRadius = dp(17).toFloat() // 17px圆角

@@ -26,7 +26,7 @@ class PopupEntryUi(override val ctx: Context, theme: Theme, keyHeight: Int, radi
     var lastShowTime = -1L
 
     val textView = view(::AutoScaleTextView) {
-        textSize = 23f
+        textSize = 30.67f
         gravity = gravityCenter
         setTextColor(theme.popupTextColor)
     }
