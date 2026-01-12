@@ -245,34 +245,34 @@ class InputView(
         background = drawable
         setOnClickListener {
             // 清空顶部EditText内容
-            clearCurrentContent()
-            
-            // 清空目标输入框内容
-            val ic = service.currentInputConnection
-            if (ic != null) {
-                try {
-                    ic.beginBatchEdit()
-                    // 获取当前文本并删除所有内容
-                    val currentText = ic.getTextBeforeCursor(10000, 0) ?: ""
-                    val afterText = ic.getTextAfterCursor(10000, 0) ?: ""
-                    val totalLength = currentText.length + afterText.length
-                    
-                    if (totalLength > 0) {
-                        // 选择所有文本并删除
-                        ic.setSelection(0, totalLength)
-                        ic.deleteSurroundingText(0, totalLength)
-                    }
-                    ic.endBatchEdit()
-                    
-                    // 清空密码缓存
-                    service.clearPasswordCache()
-                    
-                    // 重置密码状态
-                    resetPasswordFieldState()
-                } catch (e: Exception) {
-                    Timber.w("Failed to clear target input field: ${e.message}")
-                }
-            }
+//            clearCurrentContent()
+//
+//            // 清空目标输入框内容
+//            val ic = service.currentInputConnection
+//            if (ic != null) {
+//                try {
+//                    ic.beginBatchEdit()
+//                    // 获取当前文本并删除所有内容
+//                    val currentText = ic.getTextBeforeCursor(10000, 0) ?: ""
+//                    val afterText = ic.getTextAfterCursor(10000, 0) ?: ""
+//                    val totalLength = currentText.length + afterText.length
+//
+//                    if (totalLength > 0) {
+//                        // 选择所有文本并删除
+//                        ic.setSelection(0, totalLength)
+//                        ic.deleteSurroundingText(0, totalLength)
+//                    }
+//                    ic.endBatchEdit()
+//
+//                    // 清空密码缓存
+//                    service.clearPasswordCache()
+//
+//                    // 重置密码状态
+//                    resetPasswordFieldState()
+//                } catch (e: Exception) {
+//                    Timber.w("Failed to clear target input field: ${e.message}")
+//                }
+//            }
             
             service.requestHideSelf(0)
         }
