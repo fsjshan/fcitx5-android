@@ -593,7 +593,38 @@ class InputView(
 
     fun updateSelection(start: Int, end: Int) {
         broadcaster.onSelectionUpdate(start, end)
-        // 同步目标输入框的光标位置到EditText
+        // 尝试直接同步光标位置，避免不必要的全量文本同步
+        if (!isSyncing) {
+            try {
+                // 对于密码输入框，始终使用全量同步以确保状态正确
+                if (service.isPasswordInputType()) {
+                    syncFromTargetInputField()
+                    return
+                }
+
+                val currentTextLength = currentContentEditText.length()
+                // 检查光标位置是否在当前文本范围内
+                if (start <= currentTextLength && end <= currentTextLength) {
+                    // 如果光标位置已经正确，则无需操作
+                    if (currentContentEditText.selectionStart == start && currentContentEditText.selectionEnd == end) {
+                        return
+                    }
+                    
+                    isSyncing = true
+                    try {
+                        currentContentEditText.setSelection(start, end)
+                        // 如果成功设置了光标，我们假设不需要全量同步
+                        return
+                    } finally {
+                        isSyncing = false
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.w("Failed to optimize selection update: ${e.message}")
+            }
+        }
+        
+        // 如果上面的优化路径没走通（例如光标越界），或者发生了异常，回退到全量同步
         syncFromTargetInputField()
     }
 
@@ -800,28 +831,20 @@ class InputView(
         val ic = service.currentInputConnection ?: return
         
         try {
-            // 获取目标输入框的实际内容长度，考虑多行文本场景
-            val targetContent = service.getTargetInputFieldContent()
-            val currentText = getCurrentContent()
+            // 优化：不再获取全量文本进行比对，直接同步光标位置
+            // 这是一个性能关键路径，因为每次光标移动都会触发
             
-            // 使用目标输入框的实际内容长度作为最大位置限制
-            val maxPosition = targetContent.length
-            
-            // 确保光标位置在有效范围内，同时考虑单行EditText与多行目标输入框的差异
-            val safeSelStart = minOf(maxOf(selStart, 0), maxPosition)
-            val safeSelEnd = minOf(maxOf(selEnd, 0), maxPosition)
-            
-            // 验证内容一致性，如果不一致则跳过光标同步
-            if (currentText != targetContent) {
-                Timber.d("Content mismatch, skipping cursor sync: current=${currentText.length}, target=${targetContent.length}")
-                return
-            }
+            // 简单的边界检查，实际上InputConnection.setSelection会处理越界问题，
+            // 但我们在本地做一些基本的保护是好的
+            val safeSelStart = maxOf(selStart, 0)
+            val safeSelEnd = maxOf(selEnd, 0)
             
             isSyncing = true
             try {
-                // 同步光标位置到目标输入框
+                // 直接同步光标位置到目标输入框
+                // 移除昂贵的getTargetInputFieldContent()和getCurrentContent()调用
                 ic.setSelection(safeSelStart, safeSelEnd)
-                Timber.d("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd (targetLen=${targetContent.length}, currentLen=${currentText.length})")
+                Timber.v("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd")
             } catch (e: Exception) {
                 Timber.w("Failed to sync cursor to target input field: ${e.message}")
             } finally {
