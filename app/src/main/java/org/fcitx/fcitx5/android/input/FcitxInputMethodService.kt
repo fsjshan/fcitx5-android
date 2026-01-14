@@ -1164,6 +1164,15 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         } else {
             // cursor update can't match any prediction: it's treated as a user input
             selection.resetTo(newSelStart, newSelEnd)
+
+            // 如果是密码输入框，且不是预测的光标移动，则更新密码光标位置
+            // 这是为了处理用户手动点击输入框移动光标的情况
+            if (isPasswordInputType()) {
+                if (newSelStart == newSelEnd && newSelStart >= 0 && newSelStart <= cachedPlaintextPassword.length) {
+                    passwordCursorPosition = newSelStart
+                    Timber.d("User moved cursor in password field: $passwordCursorPosition")
+                }
+            }
         }
         // skip selection range update, we only care about selection cursor (zero width) here
         if (newSelStart != newSelEnd) return
