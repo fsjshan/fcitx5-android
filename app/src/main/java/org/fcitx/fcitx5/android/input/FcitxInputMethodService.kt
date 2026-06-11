@@ -186,11 +186,14 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             fcitx.runOnReady(block)
         }
         jobs.trySend(job)
+        Timber.v("[IMS] postFcitxJob: job enqueued")
         return job
     }
 
     override fun onCreate() {
+        Timber.i("[IMS] onCreate: connecting to FcitxDaemon")
         fcitx = FcitxDaemon.connect(javaClass.name)
+        Timber.i("[IMS] onCreate: FcitxDaemon.connect done, starting jobs consumer and event collector")
         lifecycleScope.launch {
             jobs.consumeEach { it.join() }
         }
@@ -204,8 +207,9 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             it.registerOnChangeListener(recreateInputViewListener)
         }
         prefs.candidates.registerOnChangeListener(recreateCandidatesViewListener)
-        ThemeManager.addOnChangedListener(onThemeChangeListener)
+       ThemeManager.addOnChangedListener(onThemeChangeListener)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Timber.d("[IMS] onCreate: API34+, posting SubtypeManager.syncWith job")
             postFcitxJob {
                 SubtypeManager.syncWith(enabledIme())
             }
@@ -213,16 +217,28 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         super.onCreate()
         decorView = window.window!!.decorView
         contentView = decorView.findViewById(android.R.id.content)
+        // 【Fix】在 onCreate 完成后立即预热 InputView（包含 TextKeyboard 构造），
+        // 让 GC 压力在用户点击输入框前就已释放，而不是等 onCreateInputView 再构建。
+        // 使用 postDelayed 100ms 让系统初始化先稳定，再在主线程空闲时执行。
+        android.os.Handler(mainLooper).postDelayed({
+            if (inputView == null) {
+                Timber.d("[IMS] onCreate: pre-warming InputView in background")
+                replaceInputViews(ThemeManager.activeTheme)
+            }
+        }, 100L)
+        Timber.i("[IMS] onCreate: done")
     }
 
     private fun handleFcitxEvent(event: FcitxEvent<*>) {
         when (event) {
             is FcitxEvent.CommitStringEvent -> {
+                Timber.i("[IMS] handleFcitxEvent: CommitStringEvent text='${event.data.text}' cursor=${event.data.cursor}")
                 commitText(event.data.text, event.data.cursor)
             }
             is FcitxEvent.KeyEvent -> event.data.let event@{
                 if (it.states.virtual) {
                     // KeyEvent from virtual keyboard
+                    Timber.d("[IMS] handleFcitxEvent: KeyEvent(virtual) sym=${it.sym} unicode=${it.unicode} up=${it.up}")
                     when (it.sym.sym) {
                         FcitxKeyMapping.FcitxKey_BackSpace -> handleBackspaceKey()
                         FcitxKeyMapping.FcitxKey_Return -> handleReturnKey()
@@ -231,21 +247,24 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                         else -> if (it.unicode > 0) {
                             commitText(Character.toString(it.unicode))
                         } else {
-                            Timber.w("Unhandled Virtual KeyEvent: $it")
+                            Timber.w("[IMS] handleFcitxEvent: Unhandled Virtual KeyEvent: $it")
                         }
                     }
                 } else {
                     // KeyEvent from physical keyboard (or input method engine forwardKey)
+                    Timber.d("[IMS] handleFcitxEvent: KeyEvent(physical) sym=${it.sym} up=${it.up} timestamp=${it.timestamp}")
                     // use cached event if available
                     cachedKeyEvents.remove(it.timestamp)?.let { keyEvent ->
+                        Timber.d("[IMS] handleFcitxEvent: forwarding cached KeyEvent ts=${it.timestamp}")
                         currentInputConnection?.sendKeyEvent(keyEvent)
                         return@event
                     }
                     // simulate key event
-                    val keyCode = it.sym.keyCode
+                    val keyCode= it.sym.keyCode
                     if (keyCode != KeyEvent.KEYCODE_UNKNOWN) {
                         // recognized keyCode
                         val eventTime = SystemClock.uptimeMillis()
+                        Timber.d("[IMS] handleFcitxEvent: simulating keyCode=$keyCode up=${it.up}")
                         if (it.up) {
                             sendUpKeyEvent(eventTime, keyCode, it.states.metaState)
                         } else {
@@ -254,25 +273,30 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                     } else {
                         // no matching keyCode, commit character once on key down
                         if (!it.up && it.unicode > 0) {
+                            Timber.d("[IMS] handleFcitxEvent: unknown keyCode, committing unicode=${it.unicode}")
                             commitText(Character.toString(it.unicode))
                         } else {
-                            Timber.w("Unhandled Fcitx KeyEvent: $it")
+                            Timber.w("[IMS] handleFcitxEvent: Unhandled Fcitx KeyEvent: $it")
                         }
                     }
                 }
             }
             is FcitxEvent.ClientPreeditEvent -> {
+                Timber.d("[IMS] handleFcitxEvent: ClientPreeditEvent preedit='${event.data}' cursor=${event.data.cursor}")
                 updateComposingText(event.data)
             }
             is FcitxEvent.DeleteSurroundingEvent -> {
                 val (before, after) = event.data
+                Timber.d("[IMS] handleFcitxEvent: DeleteSurroundingEvent before=$before after=$after")
                 handleDeleteSurrounding(before, after)
             }
             is FcitxEvent.IMChangeEvent -> {
+                Timber.i("[IMS] handleFcitxEvent: IMChangeEvent ime=${event.data.uniqueName}")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     val im = event.data.uniqueName
                     val subtype = SubtypeManager.subtypeOf(im) ?: return
                     skipNextSubtypeChange = im
+                    Timber.d("[IMS] handleFcitxEvent: IMChangeEvent API34+, switchInputMethod to subtype=${subtype.languageTag}")
                     // [^1]: notify system that input method subtype has changed
                     switchInputMethod(InputMethodUtil.componentName, subtype)
                 }
@@ -375,20 +399,24 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     fun handleReturnKey() {
+        Timber.d("[IMS] handleReturnKey: inputType=${currentInputEditorInfo.inputType} imeOptions=${currentInputEditorInfo.imeOptions}")
         currentInputEditorInfo.run {
             if (inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL) {
+                Timber.d("[IMS] handleReturnKey: TYPE_NULL → sendEnter + hideSelf")
                 sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
                 // 隐藏键盘
                 requestHideSelf(0)
                 return
             }
             if (imeOptions.hasFlag(EditorInfo.IME_FLAG_NO_ENTER_ACTION)) {
+        Timber.d("[IMS] handleReturnKey: IME_FLAG_NO_ENTER_ACTION → commitNewline + hideSelf")
                 commitText("\n")
                 // 隐藏键盘
                 requestHideSelf(0)
                 return
             }
             if (actionLabel?.isNotEmpty() == true && actionId != EditorInfo.IME_ACTION_UNSPECIFIED) {
+                Timber.d("[IMS] handleReturnKey: custom actionId=$actionId actionLabel=$actionLabel → performEditorAction + hideSelf")
                 currentInputConnection.performEditorAction(actionId)
                 // 隐藏键盘
                 requestHideSelf(0)
@@ -397,11 +425,13 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             when (val action = imeOptions and EditorInfo.IME_MASK_ACTION) {
                 EditorInfo.IME_ACTION_UNSPECIFIED,
                 EditorInfo.IME_ACTION_NONE -> {
+                    Timber.d("[IMS] handleReturnKey: action=UNSPECIFIED/NONE → commitNewline + hideSelf")
                     commitText("\n")
                     // 隐藏键盘
                     requestHideSelf(0)
                 }
                 else -> {
+                    Timber.d("[IMS] handleReturnKey: action=$action → performEditorAction + hideSelf")
                     currentInputConnection.performEditorAction(action)
                     // 隐藏键盘
                     requestHideSelf(0)
@@ -412,7 +442,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     fun commitText(text: String, cursor: Int = -1) {
         val ic = currentInputConnection ?: return
-        
+        Timber.i("[IMS] commitText: text='$text' cursor=$cursor composingEmpty=${composing.isEmpty()}")
         // 如果是密码输入框，跟踪明文密码
         if (isPasswordInputType()) {
             insertTextInPassword(text)
@@ -672,16 +702,21 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     /**
      * 同步目标输入框内容到顶端EditText
+     * 【Fix】改为 post 异步执行，避免在 onMeasure / commitText 等主线程路径上
+     * 同步触发 getTextBeforeCursor + getTextAfterCursor + getSelectedText 三次 Binder IPC，
+     * 消除首次展示时 InputView onMeasure 卡顿 900ms + 503ms。
      */
     private fun syncToTopEditText() {
-        try {
-            // 对于密码输入框，添加额外的保护检查
-            if (isPasswordInputType()) {
-                checkPasswordCacheSize()
+        val view = inputView ?: return
+        view.post {
+            try {
+                if (isPasswordInputType()) {
+                    checkPasswordCacheSize()
+                }
+                view.syncFromTargetInputField()
+            } catch (e: Exception) {
+                Timber.w("Failed to sync to top EditText: ${e.message}")
             }
-            inputView?.syncFromTargetInputField()
-        } catch (e: Exception) {
-            Timber.w("Failed to sync to top EditText: ${e.message}")
         }
     }
 
@@ -848,7 +883,16 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     override fun onCreateInputView(): View? {
-        replaceInputViews(ThemeManager.activeTheme)
+        // 【Fix】如果 onCreate 的预热已经创建好了 InputView，直接复用，
+        // 避免重复构造 TextKeyboard（40 个 KeyView + 大量 drawable → GC → onMeasure 卡顿）。
+        if (inputView == null) {
+            Timber.d("[IMS] onCreateInputView: pre-warm missed, creating InputView now")
+            replaceInputViews(ThemeManager.activeTheme)
+        } else {
+            Timber.d("[IMS] onCreateInputView: reusing pre-warmed InputView")
+            // 已有 inputView，重新 setInputView 让系统感知
+          setInputView(inputView!!)
+        }
         // We will call `setInputView` by ourselves. This is fine.
         return null
     }
@@ -912,6 +956,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         val up = event.action == KeyEvent.ACTION_UP
         val states = KeyStates.fromKeyEvent(event)
         val charCode = event.unicodeChar
+        Timber.d("[IMS] forwardKeyEvent: keyCode=${event.keyCode} charCode=$charCode up=$up ts=$timestamp")
         // try send charCode first, allow upper case and lower case character generating different KeySym
         // skip \t, because it's charCode is different from KeySym
         // skip \n, because fcitx wants \r for return
@@ -921,6 +966,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             // because fcitx doesn't recognize selection key with modifiers (eg. Alt+Q for 1)
             // in which case event.getNumber().toInt() == event.getUnicodeChar()
             val s = if (event.number.code == charCode) KeyStates.Empty else states
+            Timber.d("[IMS] forwardKeyEvent: send charCode=$charCode states=$s")
             postFcitxJob {
                 sendKey(charCode, s.states, event.scanCode, up, timestamp)
             }
@@ -928,18 +974,21 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         }
         val keySym = KeySym.fromKeyEvent(event)
         if (keySym != null) {
+            Timber.d("[IMS] forwardKeyEvent: send keySym=$keySym states=$states")
             postFcitxJob {
                 sendKey(keySym, states, event.scanCode, up, timestamp)
             }
             return true
         }
-        Timber.d("Skipped KeyEvent: $event")
+        Timber.d("[IMS] forwardKeyEvent: Skipped KeyEvent: $event")
         return false
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        Timber.d("[IMS] onKeyDown: keyCode=$keyCode")
         // request to show floating CandidatesView when pressing physical keyboard
         if (inputDeviceMgr.evaluateOnKeyDown(event, this)) {
+            Timber.d("[IMS] onKeyDown: physical keyboard detected, focus + forceShow")
             postFcitxJob {
                 focus(true)
             }
@@ -949,6 +998,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        Timber.d("[IMS] onKeyUp: keyCode=$keyCode")
         return forwardKeyEvent(event) || super.onKeyUp(keyCode, event)
     }
 
@@ -972,9 +1022,10 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     override fun onBindInput() {
         val uid = currentInputBinding.uid
         val pkgName = pkgNameCache.forUid(uid)
-        Timber.d("onBindInput: uid=$uid pkg=$pkgName")
+        Timber.i("[IMS] onBindInput: uid=$uid pkg=$pkgName firstBindInput=$firstBindInput")
         postFcitxJob {
             // ensure InputContext has been created before focusing it
+            Timber.d("[IMS] onBindInput: activating InputContext uid=$uid pkg=$pkgName")
             activate(uid, pkgName)
         }
         if (firstBindInput) {
@@ -987,6 +1038,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 val subtype = inputMethodManager.currentInputMethodSubtype ?: return
                 val im = SubtypeManager.inputMethodOf(subtype)
+                Timber.d("[IMS] onBindInput: firstBind API34+, activateIme im=$im")
                 postFcitxJob {
                     activateIme(im)
                 }

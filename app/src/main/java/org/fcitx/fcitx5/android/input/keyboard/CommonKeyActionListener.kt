@@ -40,6 +40,7 @@ import org.mechdancer.dependency.UniqueComponent
 import org.mechdancer.dependency.manager.ManagedHandler
 import org.mechdancer.dependency.manager.managedHandler
 import org.mechdancer.dependency.manager.must
+import timber.log.Timber
 
 class CommonKeyActionListener :
     UniqueComponent<CommonKeyActionListener>(), Dependent, ManagedHandler by managedHandler() {
@@ -89,59 +90,76 @@ class CommonKeyActionListener :
 
     val listener by lazy {
         KeyActionListener { action, _ ->
+            Timber.d("[KeyAction] received: ${action::class.simpleName} = $action")
             when (action) {
                 is FcitxKeyAction -> service.postFcitxJob {
+                    Timber.d("[KeyAction] FcitxKeyAction: act=${action.act} states=${action.states} code=${action.code}")
                     sendKey(action.act, action.states.states, action.code)
                 }
                 is SymAction -> service.postFcitxJob {
+                    Timber.d("[KeyAction] SymAction: sym=${action.sym} states=${action.states}")
                     sendKey(action.sym, action.states)
                 }
                 is CommitAction -> service.postFcitxJob {
+                    Timber.d("[KeyAction] CommitAction: text='${action.text}'")
                     commitAndReset()
                     service.lifecycleScope.launch { service.commitText(action.text) }
                 }
                 is QuickPhraseAction -> service.postFcitxJob {
+                    Timber.d("[KeyAction] QuickPhraseAction: commitAndReset + triggerQuickPhrase")
                     commitAndReset()
                     triggerQuickPhrase()
                 }
                 is UnicodeAction -> service.postFcitxJob {
+                    Timber.d("[KeyAction] UnicodeAction: commitAndReset + triggerUnicode")
                     commitAndReset()
                     triggerUnicode()
                 }
                 is LangSwitchAction -> {
+                    Timber.d("[KeyAction] LangSwitchAction: behavior=$langSwitchKeyBehavior")
                     when (langSwitchKeyBehavior) {
                         LangSwitchBehavior.Enumerate -> {
                             service.postFcitxJob {
                                 if (enabledIme().size < 2) {
+                                    Timber.d("[KeyAction] LangSwitch Enumerate: only 1 IME, show AddMore prompt")
                                     service.lifecycleScope.launch {
                                         service.showDialog(AddMoreInputMethodsPrompt.build(context))
                                     }
                                 } else {
+                                    Timber.d("[KeyAction] LangSwitch Enumerate: enumerateIme")
                                     enumerateIme()
                                 }
                             }
                         }
                         LangSwitchBehavior.ToggleActivate -> {
+                            Timber.d("[KeyAction] LangSwitch ToggleActivate: toggleIme")
                             service.postFcitxJob {
                                 toggleIme()
                             }
                         }
                         LangSwitchBehavior.NextInputMethodApp -> {
+                            Timber.d("[KeyAction] LangSwitch NextInputMethodApp: switchToNextIME")
                             service.switchToNextIME()
                         }
                     }
                 }
-                is ShowInputMethodPickerAction -> showInputMethodPicker()
+                is ShowInputMethodPickerAction -> {
+                    Timber.d("[KeyAction] ShowInputMethodPickerAction")
+                    showInputMethodPicker()
+                }
                 is MoveSelectionAction -> {
+                    Timber.d("[KeyAction] MoveSelectionAction: start=${action.start} end=${action.end} swipeState=$backspaceSwipeState")
                     when (backspaceSwipeState) {
                         Stopped -> {
                             backspaceSwipeState = if (
                                 preeditState.isEmpty &&
                                 horizontalCandidate.adapter.total <= 0 // total is -1 on initialization
                             ) {
+                                Timber.d("[KeyAction] MoveSelectionAction: preedit empty → applySelectionOffset, state=Selection")
                                 service.applySelectionOffset(action.start, action.end)
                                 Selection
                             } else {
+                                Timber.d("[KeyAction] MoveSelectionAction: preedit non-empty → state=Reset")
                                 Reset
                             }
                         }
@@ -152,25 +170,31 @@ class CommonKeyActionListener :
                     }
                 }
                 is DeleteSelectionAction -> {
+                    Timber.d("[KeyAction] DeleteSelectionAction: totalCnt=${action.totalCnt} swipeState=$backspaceSwipeState")
                     when (backspaceSwipeState) {
                         Stopped -> {}
-                        Selection -> service.deleteSelection()
+                        Selection -> {
+                            Timber.d("[KeyAction] DeleteSelectionAction: Selection → deleteSelection")
+                            service.deleteSelection()
+                        }
                         Reset -> if (action.totalCnt < 0) { // swipe left
+                            Timber.d("[KeyAction] DeleteSelectionAction: Reset+swipeLeft → reset fcitx")
                             service.postFcitxJob { reset() }
                         }
                     }
                     backspaceSwipeState = Stopped
                 }
                 is PickerSwitchAction -> {
-                    // update lastSymbolType only when specified explicitly
                     val key = action.key?.also { k -> lastPickerType = k.name }
                         ?: runCatching { PickerWindow.Key.valueOf(lastPickerType) }.getOrNull()
                         ?: PickerWindow.Key.Emoji
+              Timber.d("[KeyAction] PickerSwitchAction: key=$key")
                     ContextCompat.getMainExecutor(service).execute {
                         windowManager.attachWindow(key)
                     }
                 }
                 is SpaceLongPressAction -> {
+                    Timber.d("[KeyAction] SpaceLongPressAction: behavior=$spaceKeyLongPressBehavior")
                     when (spaceKeyLongPressBehavior) {
                         SpaceLongPressBehavior.None -> {}
                         SpaceLongPressBehavior.Enumerate -> service.postFcitxJob {
