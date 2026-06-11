@@ -445,12 +445,30 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
             )
             with(FcitxApplication.getInstance().directBootAwareContext) {
                 Timber.i("[Fcitx] nativeStartup: calling JNI startupFcitx, locale=$locale")
+                // 【Fix】开机时 sdcard 尚未挂载，getExternalFilesDir/externalCacheDir 会触发
+                // ContextImpl.ensureExternalDirsExistOrFilter 抛出 IllegalStateException:
+                //   "Failed to prepare /sdcard/Android/data/org.fcitx.fcitx5.android/..."
+                // 该异常若不捕获会向上传播，被 apexd 的 updatable-crash 监控捕获，
+                // 触发 rollback → ActivityManager Force stop → 进程 kill → 需要二次拉起。
+                // 修复：安全获取外部存储路径，失败时降级使用内部存储，保证首次启动成功。
+                val extDataPath = try {
+                    getExternalFilesDir(null)?.absolutePath ?: filesDir.absolutePath
+                } catch (e: IllegalStateException) {
+                    Timber.w("[Fcitx] nativeStartup: external files dir not ready (${e.message}), falling back to internal")
+                    filesDir.absolutePath
+                }
+                val extCachePath = try {
+                    externalCacheDir?.absolutePath ?: cacheDir.absolutePath
+                } catch (e: IllegalStateException) {
+                    Timber.w("[Fcitx] nativeStartup: external cache dir not ready (${e.message}), falling back to internal")
+                    cacheDir.absolutePath
+                }
                 startupFcitx(
                     locale,
                     dataDir,
                     nativeLibDir.toString(),
-                    (getExternalFilesDir(null) ?: filesDir).absolutePath,
-                    (externalCacheDir ?: cacheDir).absolutePath,
+                    extDataPath,
+                    extCachePath,
                     extDomains.toTypedArray()
                 )
             }
