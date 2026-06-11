@@ -65,10 +65,15 @@ class KeyboardWindow : InputWindow.SimpleInputWindow<KeyboardWindow>(), Essentia
 
     private lateinit var keyboardView: FrameLayout
 
+    // 【Fix】TextKeyboard 单独 lazy，避免 onCreateView 时同时构造两个键盘。
+    // NumberKeyboard 按需懒加载：正常文本输入从不触发它，无需在启动时创建。
+    private val textKeyboard: TextKeyboard by lazy { TextKeyboard(context, theme) }
+    private val numberKeyboard: NumberKeyboard by lazy { NumberKeyboard(context, theme) }
+
     private val keyboards: HashMap<String, BaseKeyboard> by lazy {
         hashMapOf(
-            TextKeyboard.Name to TextKeyboard(context, theme),
-            NumberKeyboard.Name to NumberKeyboard(context, theme)
+            TextKeyboard.Name to textKeyboard,
+            NumberKeyboard.Name to numberKeyboard
         )
     }
     private var currentKeyboardName = ""
@@ -91,7 +96,17 @@ class KeyboardWindow : InputWindow.SimpleInputWindow<KeyboardWindow>(), Essentia
     // This will be called EXACTLY ONCE
     override fun onCreateView(): View {
         keyboardView = context.frameLayout(R.id.keyboard_view)
-        attachLayout(TextKeyboard.Name)
+        // 【Fix】直接访问 textKeyboard lazy（只构造 TextKeyboard），
+        // 不触发 keyboards HashMap lazy（否则会同时构造 NumberKeyboard）。
+        currentKeyboardName = TextKeyboard.Name
+        textKeyboard.let {
+            it.keyActionListener = keyActionListener
+            it.popupActionListener = popupActionListener
+            keyboardView.apply { add(it, lParams(matchParent, matchParent)) }
+            it.onAttach()
+            it.onReturnDrawableUpdate(returnKeyDrawable.resourceId)
+            it.onInputMethodUpdate(fcitx.runImmediately { inputMethodEntryCached })
+        }
         return keyboardView
     }
 

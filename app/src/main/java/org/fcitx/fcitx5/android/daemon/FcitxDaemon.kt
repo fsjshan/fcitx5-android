@@ -84,14 +84,20 @@ object FcitxDaemon {
      * Create a connection
      */
     fun connect(name: String): FcitxConnection = lock.withLock {
-        if (name in clients)
+        Timber.d("[FcitxDaemon] connect: name=$name, currentClients=${clients.keys}")
+        if (name in clients) {
+            Timber.d("[FcitxDaemon] connect: reuse existing connection for $name")
             return@withLock clients.getValue(name)
+        }
         if (realFcitx.lifecycle.currentState == FcitxLifecycle.State.STOPPED) {
-            Timber.d("FcitxDaemon start fcitx")
+            Timber.d("[FcitxDaemon] connect: lifecycle=STOPPED, starting fcitx")
             realFcitx.start()
+        } else {
+            Timber.d("[FcitxDaemon] connect: lifecycle=${realFcitx.lifecycle.currentState}, reuse running fcitx")
         }
         val new = mkConnection(name)
         clients[name] = new
+        Timber.i("[FcitxDaemon] connect: new connection created for $name, totalClients=${clients.size}")
         return@withLock new
     }
 
@@ -99,11 +105,15 @@ object FcitxDaemon {
      * Dispose the connection
      */
     fun disconnect(name: String): Unit = lock.withLock {
-        if (name !in clients)
+        Timber.d("[FcitxDaemon] disconnect: name=$name, currentClients=${clients.keys}")
+        if (name !in clients) {
+            Timber.w("[FcitxDaemon] disconnect: $name not in clients, ignored")
             return
+        }
         clients -= name
-        if (clients.isEmpty()) {
-            Timber.d("FcitxDaemon stop fcitx")
+        Timber.i("[FcitxDaemon] disconnect: removed $name, remainingClients=${clients.size}")
+    if (clients.isEmpty()) {
+            Timber.d("[FcitxDaemon] disconnect: no clients left, stopping fcitx")
             realFcitx.stop()
         }
     }
@@ -112,6 +122,7 @@ object FcitxDaemon {
      * Restart fcitx instance while keep the clients connected
      */
     fun restartFcitx() = lock.withLock {
+        Timber.i("[FcitxDaemon] restartFcitx: triggered, currentClients=${clients.keys}")
         val id = RESTART_ID++
         NotificationCompat.Builder(appContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_baseline_sync_24)

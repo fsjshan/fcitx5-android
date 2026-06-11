@@ -4,6 +4,7 @@
  */
 package org.fcitx.fcitx5.android.ui.main
 
+import android.content.ActivityNotFoundException
 import android.os.Bundle
 import android.view.Menu
 import android.view.ViewGroup
@@ -104,7 +105,11 @@ class LogActivity : AppCompatActivity() {
             }
         }
         menu.item(R.string.export, R.drawable.ic_baseline_save_24, iconTint, true) {
-            launcher.launch("$packageName-${iso8601UTCDateTime()}.txt")
+            try {
+                launcher.launch("$packageName-${iso8601UTCDateTime()}.txt")
+            } catch (e: ActivityNotFoundException) {
+                toast(getString(R.string.no_file_manager))
+            }
         }
         return true
     }

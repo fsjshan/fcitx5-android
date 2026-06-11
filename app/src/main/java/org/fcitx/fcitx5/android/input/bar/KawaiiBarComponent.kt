@@ -70,6 +70,7 @@ import org.fcitx.fcitx5.android.utils.InputMethodUtil
 import org.mechdancer.dependency.DynamicScope
 import org.mechdancer.dependency.manager.must
 import splitties.bitflags.hasFlag
+import timber.log.Timber
 import splitties.dimensions.dp
 import splitties.views.backgroundColor
 import splitties.views.dsl.core.add
@@ -180,6 +181,7 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
             else -> IdleUi.State.Toolbar
         }
         if (newState == idleUi.currentState) return
+        Timber.d("[KawaiiBar] evalIdleUiState: fromUser=$fromUser ${idleUi.currentState} → $newState")
         idleUi.updateState(newState, fromUser)
     }
 
@@ -330,6 +332,7 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
 
     private fun switchUiByState(state: KawaiiBarStateMachine.State) {
         val index = state.ordinal
+        Timber.d("[KawaiiBar] switchUiByState: → $state (index=$index)")
         if (view.displayedChild == index) return
         val new = view.getChildAt(index)
         if (new != titleUi.root) {
@@ -367,6 +370,7 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
     }
 
     override fun onStartInput(info: EditorInfo, capFlags: CapabilityFlags) {
+        Timber.i("[KawaiiBar] onStartInput: inputType=${info.inputType} imeOptions=${info.imeOptions} capFlags=$capFlags")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             idleUi.privateMode(info.imeOptions.hasFlag(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING))
         }
@@ -378,6 +382,7 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
         voiceInputSubtype = InputMethodUtil.firstVoiceInput()
         val shouldShowVoiceInput =
             showVoiceInputButton && voiceInputSubtype != null && !capFlags.has(CapabilityFlag.Password)
+        Timber.d("[KawaiiBar] onStartInput: isPassword=$isCapabilityFlagsPassword shouldShowVoice=$shouldShowVoiceInput")
         idleUi.setHideKeyboardIsVoiceInput(
             shouldShowVoiceInput,
             if (shouldShowVoiceInput) switchToVoiceInputCallback else hideKeyboardCallback
@@ -386,14 +391,17 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
     }
 
     override fun onPreeditEmptyStateUpdate(empty: Boolean) {
+        Timber.d("[KawaiiBar] onPreeditEmptyStateUpdate: empty=$empty")
         barStateMachine.push(PreeditUpdated, PreeditEmpty to empty)
     }
 
     override fun onCandidateUpdate(data: CandidateListEvent.Data) {
+        Timber.d("[KawaiiBar] onCandidateUpdate: total=${data.total} count=${data.candidates.size} empty=${data.candidates.isEmpty()}")
         barStateMachine.push(CandidatesUpdated, CandidateEmpty to data.candidates.isEmpty())
     }
 
     override fun onWindowAttached(window: InputWindow) {
+        Timber.d("[KawaiiBar] onWindowAttached: window=${window::class.simpleName}")
         when (window) {
             is InputWindow.ExtendedInputWindow<*> -> {
                 titleUi.setTitle(window.title)
@@ -408,6 +416,7 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
     }
 
     override fun onWindowDetached(window: InputWindow) {
+        Timber.d("[KawaiiBar] onWindowDetached: window=${window::class.simpleName}")
         barStateMachine.push(WindowDetached)
     }
 

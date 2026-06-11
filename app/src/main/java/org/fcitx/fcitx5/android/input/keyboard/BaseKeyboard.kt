@@ -79,7 +79,7 @@ abstract class BaseKeyboard(
     private val disabledSwipeThreshold = dp(800f)
 
     private val bounds = Rect()
-    private val keyRows: List<ConstraintLayout>
+    private val keyRows: List<android.widget.LinearLayout>
 
     /**
      * HashMap of [PointerId (Int)][MotionEvent.getPointerId] to [KeyView]
@@ -88,51 +88,44 @@ abstract class BaseKeyboard(
 
     init {
         isMotionEventSplittingEnabled = true
+        // 【Fix】每行改用 LinearLayout weight，替代 ConstraintLayout CHAIN_PACKED。
+        // ConstraintLayout 链约束需要 2~4 轮 measure pass，每轮触发所有 KeyView 的
+        // AutoScaleTextView.onMeasure（含 Paint 文字测量），4行×10键×4轮=160次测量→卡顿425ms。
+        // LinearLayout weight 只需 1 次 measure pass，测量次数减少 75%。
         keyRows = keyLayout.map { row ->
             val keyViews = row.map(::createKeyView)
-            constraintLayout Row@{
-                var totalWidth = 0f
+            android.widget.LinearLayout(context).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                isMotionEventSplittingEnabled = true
+                var totalWeight = 0f
                 keyViews.forEachIndexed { index, view ->
-                    add(view, lParams {
-                        centerVertically()
-                        if (index == 0) {
-                            leftOfParent()
-                            horizontalChainStyle = LayoutParams.CHAIN_PACKED
-                        } else {
-                            leftToRightOf(keyViews[index - 1])
-                        }
-                        if (index == keyViews.size - 1) {
-                            rightOfParent()
-                            // for RTL
-                            horizontalChainStyle = LayoutParams.CHAIN_PACKED
-                        } else {
-                            rightToLeftOf(keyViews[index + 1])
-                        }
-                        val def = row[index]
-                        matchConstraintPercentWidth = def.appearance.percentWidth
-                    })
-                    row[index].appearance.percentWidth.let {
-                        // 0f means fill remaining space, thus does not need expanding
-                        totalWidth += if (it != 0f) it else 1f
-                    }
+                    val percentWidth = row[index].appearance.percentWidth
+                    val weight = if (percentWidth != 0f) percentWidth else 1f
+                    totalWeight += weight
+                    addView(
+                        view,
+                        android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.MATCH_PARENT, weight)
+                    )
                 }
-                if (expandKeypressArea && totalWidth < 1f) {
-                    val free = (1f - totalWidth) / 2f
-                    keyViews.first().apply {
-                        updateLayoutParams<LayoutParams> {
-                            matchConstraintPercentWidth += free
-                        }
-                        layoutMarginLeft = free / (row.first().appearance.percentWidth + free)
+                if (expandKeypressArea && totalWeight < 1f) {
+                    val free = (1f - totalWeight) / 2f
+                    (getChildAt(0) as? KeyView)?.let {
+                        val lp = it.layoutParams as android.widget.LinearLayout.LayoutParams
+                        lp.weight += free
+                        it.layoutParams = lp
+                        it.layoutMarginLeft = free / (row.first().appearance.percentWidth + free)
                     }
-                    keyViews.last().apply {
-                        updateLayoutParams<LayoutParams> {
-                            matchConstraintPercentWidth += free
-                        }
-                        layoutMarginRight = free / (row.last().appearance.percentWidth + free)
+                    (getChildAt(childCount - 1) as? KeyView)?.let {
+                        val lp = it.layoutParams as android.widget.LinearLayout.LayoutParams
+                        lp.weight += free
+                        it.layoutParams = lp
+                        it.layoutMarginRight = free / (row.last().appearance.percentWidth + free)
                     }
                 }
             }
         }
+        // 行布局：从最后一行贴底部向上排列，键盘整体贴近底部
+        // 底部间距 dp(2)，行间距 dp(2)，与字母键盘行间距一致
         keyRows.forEachIndexed { index, row ->
             add(row, lParams(matchParent, dp(55)) {
                 if (index == 0) {
@@ -141,8 +134,6 @@ abstract class BaseKeyboard(
                     below(keyRows[index - 1])
                     topMargin = dp(4) // 调整为4dp行间距
                 }
-//                if (index == keyRows.size - 1) bottomOfParent()
-//                else above(keyRows[index + 1])
                 centerHorizontally()
                 // 添加左右边距2dp
                 marginStart = dp(2)

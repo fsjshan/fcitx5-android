@@ -382,8 +382,9 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
         @JvmStatic
         fun handleFcitxEvent(type: Int, params: Array<Any>) {
             val event = FcitxEvent.create(type, params)
-            Timber.d("Handling $event")
+            Timber.d("[Fcitx][JNI] handleFcitxEvent: type=$type event=$event")
             if (event is FcitxEvent.ReadyEvent) {
+                Timber.i("[Fcitx][JNI] ReadyEvent received, firstRun=$firstRun")
                 if (firstRun) {
                     // this method runs in same thread with `startupFcitx`
                     // block it will also block fcitx
@@ -391,7 +392,8 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
                 }
             }
             fcitxEventHandlers.forEach { it.invoke(event) }
-            eventFlow_.tryEmit(event)
+            val emitted = eventFlow_.tryEmit(event)
+            if (!emitted) Timber.w("[Fcitx][JNI] eventFlow buffer full, dropped: $event")
         }
 
         // will be called in fcitx main thread
@@ -416,6 +418,7 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
 
     private val dispatcher = FcitxDispatcher(object : FcitxDispatcher.FcitxController {
         override fun nativeStartup() {
+            Timber.i("[Fcitx] nativeStartup: begin, syncing data...")
             DataManager.sync()
             val locale = Locales.fcitxLocale
             val dataDir = DataManager.dataDir.absolutePath
@@ -441,6 +444,7 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
             """.trimIndent()
             )
             with(FcitxApplication.getInstance().directBootAwareContext) {
+                Timber.i("[Fcitx] nativeStartup: calling JNI startupFcitx, locale=$locale")
                 startupFcitx(
                     locale,
                     dataDir,
@@ -450,9 +454,12 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
                     extDomains.toTypedArray()
                 )
             }
+            Timber.i("[Fcitx] nativeStartup: JNI startupFcitx returned")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 lifecycle.launchWhenReady {
+                    Timber.d("[Fcitx] nativeStartup: syncing SubtypeManager (API34+)")
                     SubtypeManager.syncWith(enabledIme())
+                    Timber.d("[Fcitx] nativeStartup: SubtypeManager sync done")
                 }
             }
         }
@@ -466,7 +473,9 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
         }
 
         override fun nativeExit() {
+            Timber.i("[Fcitx] nativeExit: calling JNI exitFcitx")
             exitFcitx()
+            Timber.i("[Fcitx] nativeExit: done")
         }
 
     })
@@ -493,56 +502,76 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
 
     private fun handleFcitxEvent(event: FcitxEvent<*>) {
         when (event) {
-            is FcitxEvent.ReadyEvent -> lifecycleRegistry.postEvent(FcitxLifecycle.Event.ON_READY)
-            is FcitxEvent.IMChangeEvent -> inputMethodEntryCached = event.data
+            is FcitxEvent.ReadyEvent -> {
+                Timber.i("[Fcitx] handleFcitxEvent: ReadyEvent → postEvent ON_READY")
+                lifecycleRegistry.postEvent(FcitxLifecycle.Event.ON_READY)
+            }
+            is FcitxEvent.IMChangeEvent -> {
+                Timber.i("[Fcitx] handleFcitxEvent: IMChangeEvent → ime=${event.data.uniqueName}")
+                inputMethodEntryCached = event.data
+            }
             is FcitxEvent.StatusAreaEvent -> {
                 val (actions, im) = event.data
                 statusAreaActionsCached = actions
+                Timber.d("[Fcitx] handleFcitxEvent: StatusAreaEvent → im=${im.uniqueName}, actions=${actions.size}")
                 // Engine subMode update won't trigger IMChangeEvent, but usually updates StatusArea
                 if (im != inputMethodEntryCached) {
+                    Timber.i("[Fcitx] handleFcitxEvent: StatusAreaEvent im changed (${inputMethodEntryCached.uniqueName} → ${im.uniqueName}), emitting IMChangeEvent")
                     inputMethodEntryCached = im
                     // notify downstream consumers that engine subMode has changed
                     eventFlow_.tryEmit(FcitxEvent.IMChangeEvent(im))
                 }
             }
-            is FcitxEvent.ClientPreeditEvent -> clientPreeditCached = event.data
-            is FcitxEvent.InputPanelEvent -> inputPanelCached = event.data
+            is FcitxEvent.ClientPreeditEvent -> {
+                Timber.d("[Fcitx] handleFcitxEvent: ClientPreeditEvent → preedit='${event.data}'")
+                clientPreeditCached = event.data
+            }
+            is FcitxEvent.InputPanelEvent -> {
+                Timber.d("[Fcitx] handleFcitxEvent: InputPanelEvent → preedit='${event.data.preedit}'")
+                inputPanelCached = event.data
+            }
             else -> {}
         }
     }
 
     fun start() {
         if (lifecycle.currentState != FcitxLifecycle.State.STOPPED) {
-            Timber.w("Skip starting fcitx: not at stopped state!")
+            Timber.w("[Fcitx] start: Skip, not at STOPPED, currentState=${lifecycle.currentState}")
             return
         }
+        Timber.i("[Fcitx] start: lifecycle STOPPED → STARTING, registering event handler")
         registerFcitxEventHandler(::handleFcitxEvent)
         lifecycleRegistry.postEvent(FcitxLifecycle.Event.ON_START)
         ClipboardManager.addOnUpdateListener(onClipboardUpdate)
         DataManager.addOnNextSyncedCallback {
+            Timber.d("[Fcitx] start: DataManager synced, connecting plugin services")
             FcitxPluginServices.connectAll()
         }
+        Timber.d("[Fcitx] start: starting FcitxDispatcher")
         dispatcher.start()
     }
 
     fun stop() {
         if (lifecycle.currentState != FcitxLifecycle.State.READY) {
-            Timber.w("Skip stopping fcitx: not at ready state!")
+            Timber.w("[Fcitx] stop: Skip, not at READY, currentState=${lifecycle.currentState}")
             return
         }
+        Timber.i("[Fcitx] stop: lifecycle READY → STOPPING")
         lifecycleRegistry.postEvent(FcitxLifecycle.Event.ON_STOP)
-        Timber.i("Fcitx stop()")
         ClipboardManager.removeOnUpdateListener(onClipboardUpdate)
         FcitxPluginServices.disconnectAll()
+        Timber.d("[Fcitx] stop: stopping FcitxDispatcher (blocking)")
         dispatcher.stop().let {
             if (it.isNotEmpty())
-                Timber.w("${it.size} job(s) didn't get a chance to run!")
+                Timber.w("[Fcitx] stop: ${it.size} job(s) didn't get a chance to run!")
         }
+        Timber.i("[Fcitx] stop: dispatcher stopped → postEvent ON_STOPPED")
         lifecycleRegistry.postEvent(FcitxLifecycle.Event.ON_STOPPED)
         unregisterFcitxEventHandler(::handleFcitxEvent)
         // clear addon graph
         addonGraph = null
         addonReverseDependencies.clear()
+        Timber.i("[Fcitx] stop: done, lifecycle=STOPPED")
     }
 
 }

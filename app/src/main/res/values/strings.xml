@@ -82,6 +82,7 @@
     <string name="instruction_copy">Try copying something</string>
     <string name="clear">Clear</string>
     <string name="export">Export</string>
+    <string name="no_file_manager">No file manager app found to save the file</string>
     <string name="app_crash">Application crashed</string>
     <string name="app_crash_message">Sorry, but we bring you some logs to investigate.</string>
     <string name="crash_logs">Crash logs</string>
