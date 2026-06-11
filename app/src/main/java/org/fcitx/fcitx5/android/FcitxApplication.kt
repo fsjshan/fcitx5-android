@@ -51,12 +51,18 @@ class FcitxApplication : Application() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != Intent.ACTION_USER_UNLOCKED) return
             if (!isDirectBootMode) return
-            Timber.d("Device unlocked, app will exit now and restart to normal mode")
-            FcitxDaemon.getFirstConnectionOrNull()?.also {
-                // try to shutdown fcitx gracefully
-                FcitxDaemon.stopFcitx()
+            Timber.i("Device unlocked, switching from DirectBoot to normal mode, restarting fcitx")
+            // 【Fix】原来调用 AppUtil.exit() → exitProcess(0)，系统将 IME 服务主动退出
+            // 识别为 crashed service，触发 "Scheduling restart"，导致每次开机两次拉起。
+            // 修复：退出 DirectBoot 模式，原地重启 fcitx（使用 CredentialProtectedStorage），
+            // 不退出进程，系统无需重新绑定，一次拉起即可正常运行。
+            isDirectBootMode = false
+            // 补同步 prefs/theme 到 DeviceEncryptedStorage（DirectBoot 时未执行）
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                AppPrefs.getInstance().syncToDeviceEncryptedStorage()
+                ThemeManager.syncToDeviceEncryptedStorage()
             }
-            AppUtil.exit()
+            FcitxDaemon.restartFcitx()
         }
     }
 
