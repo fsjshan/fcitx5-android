@@ -52,6 +52,7 @@ import org.fcitx.fcitx5.android.core.FcitxKeyMapping
 import org.fcitx.fcitx5.android.core.FormattedText
 import org.fcitx.fcitx5.android.core.KeyStates
 import org.fcitx.fcitx5.android.core.KeySym
+import org.fcitx.fcitx5.android.core.RawConfig
 import org.fcitx.fcitx5.android.core.ScancodeMapping
 import org.fcitx.fcitx5.android.core.SubtypeManager
 import org.fcitx.fcitx5.android.daemon.FcitxConnection
@@ -105,6 +106,13 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     val currentInputSelection: CursorRange
         get() = selection.latest
+
+    fun predictSelection(start: Int, end: Int = start) {
+        selection.predict(start, end)
+    }
+
+    val isComposing: Boolean
+        get() = composing.isNotEmpty()
 
     private val composing = CursorRange()
     private var composingText = FormattedText.Empty
@@ -214,6 +222,18 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 SubtypeManager.syncWith(enabledIme())
             }
         }
+        // 强制写入 pinyin 性能优化配置（首次或版本升级时）。
+        // 通过版本号避免每次启动重复写入，也不会干扰用户之后在设置界面的手动修改。
+        // 当前版本 = 2：Prediction=False, PredictionSize=5, PageSize=5,
+        //              SpellEnabled=False, SymbolsEnabled=False, Number of sentence=1
+        val PINYIN_PERF_CONFIG_VERSION = 2
+        if (prefs.internal.pinyinPerfConfigVersion.getValue() < PINYIN_PERF_CONFIG_VERSION) {
+            postFcitxJob {
+                applyPinyinPerfConfig()
+            }
+            prefs.internal.pinyinPerfConfigVersion.setValue(PINYIN_PERF_CONFIG_VERSION)
+            Timber.i("[IMS] onCreate: scheduled pinyin perf config update to v$PINYIN_PERF_CONFIG_VERSION")
+        }
         super.onCreate()
         decorView = window.window!!.decorView
         contentView = decorView.findViewById(android.R.id.content)
@@ -307,12 +327,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     private fun handleDeleteSurrounding(before: Int, after: Int) {
         val ic = currentInputConnection ?: return
-        
+
         // 如果是密码输入框，跟踪明文密码删除
         if (isPasswordInputType()) {
             deleteTextFromPassword(before, after)
         }
-        
+
         if (before > 0) {
             selection.predictOffset(-before)
         }
@@ -705,10 +725,18 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
      * 【Fix】改为 post 异步执行，避免在 onMeasure / commitText 等主线程路径上
      * 同步触发 getTextBeforeCursor + getTextAfterCursor + getSelectedText 三次 Binder IPC，
      * 消除首次展示时 InputView onMeasure 卡顿 900ms + 503ms。
+     * 【Fix2】加 pendingSyncToTopEditText 标志做 debounce：连续多次调用只投递一次任务到
+     * 主线程队列，避免中文快速输入时队列里堆积大量 syncFromTargetInputField 任务，
+     * 与 preedit 更新竞争主线程时间片导致预展示延迟。
      */
+    private var pendingSyncToTopEditText = false
+
     private fun syncToTopEditText() {
         val view = inputView ?: return
+        if (pendingSyncToTopEditText) return
+        pendingSyncToTopEditText = true
         view.post {
+            pendingSyncToTopEditText = false
             try {
                 if (isPasswordInputType()) {
                     checkPasswordCacheSize()
@@ -1462,6 +1490,38 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         }
         dialog.show()
         showingDialog = dialog
+    }
+
+    /**
+     * 强制写入 pinyin 性能优化配置。在 fcitx 线程（postFcitxJob）中调用。
+     * 先读取当前配置，仅覆盖性能相关的 key，保留其余用户配置。
+     * 核心优化：
+     *   Prediction=False    — 关闭预测词，消除每次提交后的 trie 全词典扫描
+     *   PredictionSize=5    — 即使预测词开启，只搜 10 个（maxSize*2）而非默认 98
+     *   PageSize=5          — 减少候选词排序计算量
+     *   SpellEnabled=False  — 关闭英文候选词处理
+     *   SymbolsEnabled=False — 关闭符号候选词查询
+     *   Number of sentence=1 — Viterbi 解码只保留最优路径
+     */
+    private suspend fun FcitxAPI.applyPinyinPerfConfig() {
+        try {
+            val current = getImConfig("pinyin")
+            val updates = mapOf(
+                "Prediction" to "False",
+                "PredictionSize" to "5",
+                "PageSize" to "5",
+                "SpellEnabled" to "False",
+                "SymbolsEnabled" to "False",
+                "Number of sentence" to "1"
+            )
+            updates.forEach { (key, value) ->
+                current.getOrCreate(key).value = value
+            }
+            setImConfig("pinyin", current)
+            Timber.i("[IMS] applyPinyinPerfConfig: applied ${updates.size} perf settings to pinyin")
+        } catch (e: Exception) {
+            Timber.w("[IMS] applyPinyinPerfConfig: failed: ${e.message}")
+        }
     }
 
     @Suppress("ConstPropertyName")

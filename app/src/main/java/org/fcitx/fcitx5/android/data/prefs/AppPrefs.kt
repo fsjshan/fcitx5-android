@@ -35,6 +35,8 @@ class AppPrefs(private val sharedPreferences: SharedPreferences) {
         val pid = int("pid", 0)
         val editorInfoInspector = bool("editor_info_inspector", false)
         val needNotifications = bool("need_notifications", true)
+        // 记录已应用的 pinyin 性能配置版本，用于在升级时强制重新写入优化配置
+        val pinyinPerfConfigVersion = int("pinyin_perf_config_version", 0)
     }
 
     inner class Advanced : ManagedPreferenceCategory(R.string.advanced, sharedPreferences) {
