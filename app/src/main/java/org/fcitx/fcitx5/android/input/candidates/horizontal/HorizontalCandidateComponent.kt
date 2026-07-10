@@ -166,6 +166,11 @@ class HorizontalCandidateComponent :
             adapter = this@HorizontalCandidateComponent.adapter
             layoutManager = this@HorizontalCandidateComponent.layoutManager
             addItemDecoration(FlexboxVerticalDecoration(dividerDrawable))
+            // 候选词高频更新，禁用 item 动画：
+            // 增量通知（notifyItemChanged/Inserted/Removed）会触发 DefaultItemAnimator，
+            // 动画期间 ViewHolder 处于 tmpDetached 状态，若动画未结束时再次更新会
+            // 触发 "Tmp detached view should be removed" crash
+            itemAnimator = null
         }
     }
 
