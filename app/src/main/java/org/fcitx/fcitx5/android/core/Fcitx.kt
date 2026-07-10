@@ -420,6 +420,31 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
         override fun nativeStartup() {
             Timber.i("[Fcitx] nativeStartup: begin, syncing data...")
             DataManager.sync()
+            // 若 pinyin.conf 尚不存在（首次安装/清除数据），写入性能优化默认配置。
+            // fcitx ini 格式：顶层 Option 无 section 头，直接 Key=Value。
+            //   PageSize=5          每页候选词从默认 7 降到 5，减少引擎排序计算量
+            //   SpellEnabled=False  关闭英文候选词，去掉 spell addon 的额外处理
+            //   SymbolsEnabled=False 关闭符号候选词查询
+            //   Prediction=False    关闭预测词，去掉 initPredict/updatePredict 计算
+            //   PredictionSize=5    即使预测词开启，也只搜 10 个候选（maxSize*2）而非 98
+            //   Number of sentence=1 句子解码 nbest 从 2 降到 1，减少 Viterbi 路径
+            val pinyinConfFile = DataManager.dataDir.resolve("conf/pinyin.conf")
+            if (!pinyinConfFile.exists()) {
+                try {
+                    pinyinConfFile.parentFile?.mkdirs()
+                    pinyinConfFile.writeText(
+                        "PageSize=5\n" +
+                        "SpellEnabled=False\n" +
+                        "SymbolsEnabled=False\n" +
+                        "Prediction=False\n" +
+                        "PredictionSize=5\n" +
+                        "Number of sentence=1\n"
+                    )
+                    Timber.i("[Fcitx] nativeStartup: wrote optimized pinyin.conf defaults")
+                } catch (e: Exception) {
+                    Timber.w("[Fcitx] nativeStartup: failed to write pinyin.conf: ${e.message}")
+                }
+            }
             val locale = Locales.fcitxLocale
             val dataDir = DataManager.dataDir.absolutePath
             val plugins = DataManager.getLoadedPlugins()

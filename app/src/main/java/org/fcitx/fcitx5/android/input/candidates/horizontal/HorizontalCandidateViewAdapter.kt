@@ -5,7 +5,6 @@
 
 package org.fcitx.fcitx5.android.input.candidates.horizontal
 
-import android.annotation.SuppressLint
 import android.view.ViewGroup
 import androidx.annotation.CallSuper
 import androidx.recyclerview.widget.RecyclerView
@@ -27,11 +26,23 @@ open class HorizontalCandidateViewAdapter(val theme: Theme) :
     var total = -1
         private set
 
-    @SuppressLint("NotifyDataSetChanged")
     fun updateCandidates(data: Array<String>, total: Int) {
+        val old = this.candidates
         this.candidates = data
         this.total = total
-        notifyDataSetChanged()
+        // 增量更新：避免 notifyDataSetChanged 触发所有 item 全量重绘
+        // AutoScaleTextView.setText 会调 requestLayout+invalidate，批量重绘开销大
+        val oldSize = old.size
+        val newSize = data.size
+        val commonSize = minOf(oldSize, newSize)
+        // 更新内容变化的位置（逐项比对，跳过未变化的 item）
+        for (i in 0 until commonSize) {
+            if (old[i] != data[i]) notifyItemChanged(i)
+        }
+        when {
+            newSize > oldSize -> notifyItemRangeInserted(oldSize, newSize - oldSize)
+            newSize < oldSize -> notifyItemRangeRemoved(newSize, oldSize - newSize)
+        }
     }
 
     override fun getItemCount() = candidates.size

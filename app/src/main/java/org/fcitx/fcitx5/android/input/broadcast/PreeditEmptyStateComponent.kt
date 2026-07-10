@@ -22,6 +22,10 @@ class PreeditEmptyStateComponent :
     var isEmpty: Boolean = true
         private set
 
+    // 缓存上次已知的 preedit 状态，避免每次都通过 runImmediately 读 fcitx 缓存（有锁竞争）
+    private var lastClientPreeditEmpty: Boolean = true
+    private var lastPreeditEmpty: Boolean = true
+
     fun updatePreeditEmptyState(
         clientPreedit: FormattedText = fcitx.runImmediately { clientPreeditCached },
         preedit: FormattedText = fcitx.runImmediately { inputPanelCached.preedit }
@@ -33,4 +37,14 @@ class PreeditEmptyStateComponent :
         returnKeyDrawable.updateDrawableOnPreedit(isEmpty)
     }
 
+    // 直接用已知的空/非空状态更新，避免 runImmediately 锁竞争
+    fun updatePreeditEmptyStateByKnown(clientPreeditEmpty: Boolean? = null, preeditEmpty: Boolean? = null) {
+        if (clientPreeditEmpty != null) lastClientPreeditEmpty = clientPreeditEmpty
+        if (preeditEmpty != null) lastPreeditEmpty = preeditEmpty
+        val empty = lastClientPreeditEmpty && lastPreeditEmpty
+        if (isEmpty == empty) return
+        isEmpty = empty
+        broadcaster.onPreeditEmptyStateUpdate(isEmpty)
+        returnKeyDrawable.updateDrawableOnPreedit(isEmpty)
+    }
 }
