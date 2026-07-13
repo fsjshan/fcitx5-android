@@ -122,9 +122,8 @@ class InputView(
             textSize = 22f // 设置字号为22sp
             setTextColor(0xFFFFFFFF.toInt()) // 白色文字
             setHintTextColor(0xFF888888.toInt()) // 灰色提示文字
-            
+
             // 设置单行显示，上下居中
-            setSingleLine(true)
             gravity = android.view.Gravity.CENTER_VERTICAL
             val drawable = android.graphics.drawable.GradientDrawable()
             drawable.setColor(0xFF17171A.toInt())
@@ -382,7 +381,7 @@ class InputView(
                 endOfParent()
                 topMargin = dp(8)
             })
-            // 添加当前内容显示的EditText到最顶部 - 设置1724x84px尺寸
+            // 添加当前内容显示的EditText到最顶部 - 设置284x84px尺寸
             add(currentContentEditText, lParams(dp(284), dp(84)) {
                 topOfParent()
                 centerHorizontally()
