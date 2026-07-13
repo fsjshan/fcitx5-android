@@ -438,7 +438,8 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
                         "SymbolsEnabled=False\n" +
                         "Prediction=False\n" +
                         "PredictionSize=5\n" +
-                        "Number of sentence=1\n"
+                        "Number of sentence=1\n" +
+                        "VAsQuickphrase=False\n"
                     )
                     Timber.i("[Fcitx] nativeStartup: wrote optimized pinyin.conf defaults")
                 } catch (e: Exception) {

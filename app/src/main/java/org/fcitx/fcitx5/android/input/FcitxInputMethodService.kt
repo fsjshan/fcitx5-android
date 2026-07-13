@@ -224,9 +224,10 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         }
         // 强制写入 pinyin 性能优化配置（首次或版本升级时）。
         // 通过版本号避免每次启动重复写入，也不会干扰用户之后在设置界面的手动修改。
-        // 当前版本 = 2：Prediction=False, PredictionSize=5, PageSize=5,
-        //              SpellEnabled=False, SymbolsEnabled=False, Number of sentence=1
-        val PINYIN_PERF_CONFIG_VERSION = 2
+        // 当前版本 = 3：Prediction=False, PredictionSize=5, PageSize=5,
+        //              SpellEnabled=False, SymbolsEnabled=False, Number of sentence=1,
+        //              VAsQuickphrase=False（关闭 V 键触发快速输入）
+        val PINYIN_PERF_CONFIG_VERSION = 3
         if (prefs.internal.pinyinPerfConfigVersion.getValue() < PINYIN_PERF_CONFIG_VERSION) {
             postFcitxJob {
                 applyPinyinPerfConfig()
@@ -1512,7 +1513,8 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 "PageSize" to "5",
                 "SpellEnabled" to "False",
                 "SymbolsEnabled" to "False",
-                "Number of sentence" to "1"
+                "Number of sentence" to "1",
+                "VAsQuickphrase" to "False"
             )
             updates.forEach { (key, value) ->
                 current.getOrCreate(key).value = value
