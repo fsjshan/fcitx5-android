@@ -919,8 +919,11 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             replaceInputViews(ThemeManager.activeTheme)
         } else {
             Timber.d("[IMS] onCreateInputView: reusing pre-warmed InputView")
-            // 已有 inputView，重新 setInputView 让系统感知
-          setInputView(inputView!!)
+            // 【Fix】预热时 setInputView 已将 inputView 加入 mInputFrame，
+            // onCreateInputView 再次复用时 super.setInputView 内部会再次 addView，
+            // 导致 "child already has a parent" crash。先 removeView 解除旧父容器关联。
+            (inputView!!.parent as? ViewGroup)?.removeView(inputView)
+            setInputView(inputView!!)
         }
         // We will call `setInputView` by ourselves. This is fine.
         return null
