@@ -97,10 +97,18 @@ abstract class BaseKeyboard(
             android.widget.LinearLayout(context).apply {
                 orientation = android.widget.LinearLayout.HORIZONTAL
                 isMotionEventSplittingEnabled = true
+                // percentWidth == 0 表示「弹性键」：平分固定宽度键占用之后剩余的宽度。
+                // 若直接取 weight = 1f，会让弹性键在总权重里占绝对优势，
+                // 把固定宽度键（如数字键盘两侧的 +、/、-、空格、退格）挤成极窄的一条。
+                val fixedWidth = row.sumOf { it.appearance.percentWidth.toDouble() }.toFloat()
+                val flexCount = row.count { it.appearance.percentWidth == 0f }
+                val flexWidth = if (flexCount > 0) {
+                    ((1f - fixedWidth) / flexCount).coerceAtLeast(0.05f)
+                } else 0f
                 var totalWeight = 0f
                 keyViews.forEachIndexed { index, view ->
                     val percentWidth = row[index].appearance.percentWidth
-                    val weight = if (percentWidth != 0f) percentWidth else 1f
+                    val weight = if (percentWidth != 0f) percentWidth else flexWidth
                     totalWeight += weight
                     addView(
                         view,
