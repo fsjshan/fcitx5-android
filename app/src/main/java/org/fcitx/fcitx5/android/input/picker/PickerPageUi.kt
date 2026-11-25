@@ -238,9 +238,14 @@ class PickerPageUi(
                             }
 
                             CustomGestureView.GestureType.Up -> {
-                                onPopupTrigger(view.id).also {
+                                // onPopupTrigger() already dispatches DismissAction when it
+                                // returns true; dispatching it twice for the same viewId would
+                                // schedule two dismiss jobs and recycle the PopupEntryUi twice.
+                                val triggered = onPopupTrigger(view.id)
+                                if (!triggered) {
                                     onPopupAction(PopupAction.DismissAction(view.id))
                                 }
+                                triggered
                             }
                         }
                     }

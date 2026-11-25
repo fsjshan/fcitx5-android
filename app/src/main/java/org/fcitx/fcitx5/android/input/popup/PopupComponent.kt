@@ -6,6 +6,7 @@ package org.fcitx.fcitx5.android.input.popup
 
 import android.graphics.Rect
 import android.view.View
+import android.view.ViewGroup
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -78,11 +79,20 @@ class PopupComponent :
         }
     }
 
+    /**
+     * Cancel and remove the pending dismiss job of [viewId], if any.
+     * Must be called whenever the popup entry of [viewId] is reused or recycled manually,
+     * otherwise a stale job would recycle the entry a second time, putting the same
+     * [PopupEntryUi] instance into [freeEntryUi] twice and eventually causing
+     * "The specified child already has a parent" when it's polled by two different views.
+     */
+    private fun cancelDismissJob(viewId: Int) {
+        dismissJobs.remove(viewId)?.cancel()
+    }
+
     private fun showPopup(viewId: Int, content: String, bounds: Rect) {
         showingEntryUi[viewId]?.apply {
-            dismissJobs[viewId]?.also {
-                dismissJobs.remove(viewId)?.cancel()
-            }
+            cancelDismissJob(viewId)
             lastShowTime = System.currentTimeMillis()
             setText(content)
             return
@@ -92,6 +102,8 @@ class PopupComponent :
             lastShowTime = System.currentTimeMillis()
             setText(content)
         }
+        // defensive: the instance may still be attached if it was recycled twice by mistake
+        (popup.root.parent as? ViewGroup)?.removeView(popup.root)
         root.apply {
             add(popup.root, lParams(popupWidth, popupHeight) {
                 // align popup bottom with key border bottom [^1]
@@ -111,7 +123,12 @@ class PopupComponent :
             ?: EmojiModifier.produceSkinTones(keyboard.label)
             ?: return
         // clear popup preview text         OR create empty popup preview
-        showingEntryUi[viewId]?.setText("") ?: showPopup(viewId, "", bounds)
+        showingEntryUi[viewId]?.also {
+            // the entry is reused, so a pending dismiss job must not recycle it
+            cancelDismissJob(viewId)
+            it.lastShowTime = System.currentTimeMillis()
+            it.setText("")
+        } ?: showPopup(viewId, "", bounds)
         reallyShowKeyboard(viewId, keys, bounds)
     }
 
@@ -138,6 +155,8 @@ class PopupComponent :
 
     private fun showMenu(viewId: Int, menu: KeyDef.Popup.Menu, bounds: Rect) {
         showingEntryUi[viewId]?.let {
+            // recycled manually here, so the pending job must not recycle it again
+            cancelDismissJob(viewId)
             dismissPopupEntry(viewId, it)
         }
         val menuUi = PopupMenuUi(
@@ -152,6 +171,8 @@ class PopupComponent :
     }
 
     private fun showPopupContainer(viewId: Int, ui: PopupContainerUi) {
+        // an old container of the same view may still be attached; detach it first
+        dismissPopupContainer(viewId)
         root.apply {
             add(ui.root, lParams {
                 leftMargin = ui.triggerBounds.left + ui.offsetX - rootBounds.left
@@ -172,6 +193,10 @@ class PopupComponent :
     private fun dismissPopup(viewId: Int) {
         dismissPopupContainer(viewId)
         showingEntryUi[viewId]?.also {
+            // a dismiss job may already be scheduled (eg. DismissAction delivered twice
+            // for the same gesture); never leave the old one running, or the entry would
+            // be recycled twice into freeEntryUi
+            cancelDismissJob(viewId)
             val timeLeft = it.lastShowTime + hideThreshold - System.currentTimeMillis()
             if (timeLeft <= 0L) {
                 dismissPopupEntry(viewId, it)
@@ -186,16 +211,21 @@ class PopupComponent :
     }
 
     private fun dismissPopupContainer(viewId: Int) {
-        showingContainerUi[viewId]?.also {
-            showingContainerUi.remove(viewId)
+        showingContainerUi.remove(viewId)?.also {
             root.removeView(it.root)
         }
     }
 
+    /**
+     * Idempotent: only the call that actually removes [viewId] from [showingEntryUi]
+     * is allowed to detach the view and return it to the object pool.
+     */
     private fun dismissPopupEntry(viewId: Int, popup: PopupEntryUi) {
-        showingEntryUi.remove(viewId)
+        if (showingEntryUi.remove(viewId) == null) return
         root.removeView(popup.root)
-        freeEntryUi.add(popup)
+        if (!freeEntryUi.contains(popup)) {
+            freeEntryUi.add(popup)
+        }
     }
 
     fun dismissAll() {
@@ -212,7 +242,9 @@ class PopupComponent :
         // too too
         showingEntryUi.forEach { (_, entry) ->
             root.removeView(entry.root)
-            freeEntryUi.add(entry)
+            if (!freeEntryUi.contains(entry)) {
+                freeEntryUi.add(entry)
+            }
         }
         showingEntryUi.clear()
     }
