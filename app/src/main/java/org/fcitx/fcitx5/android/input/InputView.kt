@@ -118,6 +118,12 @@ class InputView(
             isEnabled = true
             isFocusable = true
             isFocusableInTouchMode = true
+            // 【Fix】顶部框获取焦点时，TextView 默认会调用 InputMethodManager.showSoftInput()。
+            // 本 View 处在 IME 自己的 SoftInputWindow 内（FLAG_ALT_FOCUSABLE_IM），
+            // 该调用在多数 ROM 上是 no-op，但部分 ROM 会导致 IME 自我重入
+            // （重新走 onStartInput → 与 syncFromTargetInputField / composing 状态产生竞态）。
+            // 顶部框的文本由 syncFromTargetInputField 驱动，无需自己唤起输入法，故关闭。
+            showSoftInputOnFocus = false
             setPadding(dp(16), dp(12), dp(16), dp(12))
             textSize = 22f // 设置字号为22sp
             setTextColor(0xFFFFFFFF.toInt()) // 白色文字
@@ -500,6 +506,54 @@ class InputView(
     }
 
     /**
+     * 让顶部输入框获得 View 级焦点，使光标自动出现在顶部框内。
+     *
+     * 【背景】IME 的 SoftInputWindow 带 FLAG_NOT_FOCUSABLE，永远拿不到窗口焦点，
+     * 但 Editor.shouldBlink() 只检查 isCursorVisible() && isFocused() && selStart == selEnd，
+     * 并不检查 hasWindowFocus()，且 suspendBlink() 仅在"窗口焦点 true→false"的转变时刻触发
+     * （本窗口从未有过窗口焦点，故从未触发）。因此 View 级焦点足以让光标正常闪烁，
+     * 无需改动任何 window flag。
+     *
+     * 【为何需要手动调】touch mode 下 ViewRootImpl 不会自动挑选 focusable view
+     * （自动聚焦只发生在按键导航场景），此前只有 TextView.onTouchEvent 内部那次隐式
+     * requestFocus() 能让光标出现，表现为"必须手动点一次顶部框"。
+     *
+     * 【刻意不改 selection】requestFocus() 本身不改变 selection
+     * （Editor.onFocusChanged 仅在 selStart < 0 时兜底置 0），
+     * 而 setText/setSelection 由 [syncFromTargetInputField] 负责。
+     * 因此这里无需 isSyncing 包裹，也不会通过 onSelectionChanged
+     * 反向把目标 App 的光标拖到末尾。
+     *
+     * 幂等：三处调用点重复触发无副作用。
+     */
+    private fun focusTopEditText() {
+        val et = currentContentEditText
+        // 未 attach 时焦点无法落地到 ViewRootImpl；非 VISIBLE 时 requestFocus 直接返回 false
+        if (!et.isAttachedToWindow) return
+        if (et.visibility != View.VISIBLE) return
+        if (et.isFocused) return
+        et.requestFocus()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        // 覆盖 startInput 的 post 块执行时尚未 attach 的竞态。
+        // 【必须 post】ViewGroup.dispatchAttachedToWindow() 会先调用自身的
+        // onAttachedToWindow()，之后才遍历 attach 子 View，所以此刻
+        // currentContentEditText.isAttachedToWindow 仍为 false，直接调用会被守卫挡掉。
+        post { focusTopEditText() }
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == View.VISIBLE) {
+            // 覆盖 InputView 被复用、未重新 attach、仅 GONE/INVISIBLE → VISIBLE 的二次弹出场景。
+            // 同样 post：首次 attach 链路中这个回调也早于子 View attach。
+            post { focusTopEditText() }
+        }
+    }
+
+    /**
      * called when [InputView] is about to show, or restart
      */
     fun startInput(info: EditorInfo, capFlags: CapabilityFlags, restarting: Boolean = false) {
@@ -509,7 +563,11 @@ class InputView(
             windowManager.attachWindow(KeyboardWindow)
         }
         // 【Fix】将 syncFromTargetInputField 推迟，避免在 onMeasure 期间触发 Binder IPC
-        post { syncFromTargetInputField() }
+        post {
+            syncFromTargetInputField()
+            // 文本/光标同步完成后再获焦，确保首帧光标就落在正确位置
+            focusTopEditText()
+        }
     }
 
     override fun handleFcitxEvent(it: FcitxEvent<*>) {
