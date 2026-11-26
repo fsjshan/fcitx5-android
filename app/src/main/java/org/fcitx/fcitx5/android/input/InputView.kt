@@ -102,8 +102,143 @@ class InputView(
     // 同步标志，防止无限循环
     private var isSyncing = false
 
-    // 密码输入框状态跟踪
-    private var isPasswordFieldCleared = false  // 标记密码输入框是否已被��空
+    // 【Fix】顶部框光标权威标志。
+    // 目标 App 的输入框（尤其是 WebView / 部分自绘输入框）在收到 setSelection 后
+    // 常常立刻回调一个"旧"的 onUpdateSelection，或在 commitText 后把光标留在
+    // 插入点+1 的位置。若每次都无条件采纳目标框上报的光标，顶部框光标就会被拉走，
+    // 表现为"光标跳变"、"后续字符追加到末尾"。
+    //
+    // 但"顶部框一操作就无条件权威"会走向另一个极端：目标框若忽略 setSelection，
+    // 顶部框光标被锁死，实际插入位置不变。因此分两步：
+    //   1) 顶部框光标/文本变化 → 置 pending（见 markTopCursorPending）；
+    //   2) 目标框随后的 onUpdateSelection 与之吻合 → 升级为权威；
+    //      不吻合 → 丢弃 pending，跟随目标框。
+    // 权威状态在用户点击目标 App 输入框（onStartInput）时撤销。
+    //
+    // 【Fix】为避免"目标框回声"把 pending 过早拒掉（顶部框刚 setSelection，
+    // 目标框立刻回调一个旧光标），顶部框发出 setSelection 时置 topCursorSyncIssued，
+    // 其后的第一个回调视为回声：一致则确认权威，不一致则忽略，只有再往后的回调才拒绝。
+    private var topEditTextAuthoritative = false
+
+    /** 顶部框已把光标 setSelection 给目标框，等待其回声回调（见 onUpdateSelection）。 */
+    private var topCursorSyncIssued = false
+
+    /** 顶部框光标是否已 setSelection 给目标框、等待其回声回调。 */
+    fun isTopCursorSyncIssued(): Boolean = topCursorSyncIssued
+
+    /** 标记"顶部框已把光标发给目标框"。 */
+    fun markTopCursorSyncIssued() {
+        topCursorSyncIssued = true
+    }
+
+    /** 回声回调已消费，后续回调恢复正常裁决。 */
+    fun markTopCursorSyncEchoConsumed() {
+        topCursorSyncIssued = false
+    }
+
+    /**
+     * 顶部 EditText 光标是否应作为权威来源（供 [FcitxInputMethodService] 判断）。
+     */
+    fun isTopEditTextAuthoritative(): Boolean = topEditTextAuthoritative
+
+    /**
+     * 顶部 EditText 当前光标位置（越界时收敛到 [0, length]）。
+     */
+    fun getTopEditTextCursor(): Int {
+        val et = currentContentEditText
+        val len = et.length()
+        val start = try {
+            et.selectionStart
+        } catch (e: Exception) {
+            -1
+        }
+        val end = try {
+            et.selectionEnd
+        } catch (e: Exception) {
+            -1
+        }
+        // 有选区时以选区起点为插入点
+        val cursor = if (start >= 0) minOf(start, end.takeIf { it >= 0 } ?: start) else len
+        return cursor.coerceIn(0, len)
+    }
+
+    /**
+     * 顶部 EditText 当前选区（供 [FcitxInputMethodService] 使用）。
+     */
+    fun getTopEditTextSelection(): Pair<Int, Int> {
+        val et = currentContentEditText
+        val len = et.length()
+        val start = try {
+            et.selectionStart
+        } catch (e: Exception) {
+            -1
+        }
+        val end = try {
+            et.selectionEnd
+        } catch (e: Exception) {
+            -1
+        }
+        if (start < 0 || end < 0) return len to len
+        return start.coerceIn(0, len) to end.coerceIn(0, len)
+    }
+
+    /**
+     * 取消顶部框的光标权威（例如目标 App 输入框重新获得输入会话）。
+     */
+    fun clearTopEditTextAuthoritative() {
+        topEditTextAuthoritative = false
+        topCursorPending = false
+        topCursorSyncIssued = false
+    }
+
+    /**
+     * 【Fix】顶部框光标权威的"待确认"状态。
+     *
+     * 顶部框移动光标时，用户意图是"把插入点放到这里"，但此刻我们并不知道
+     * 目标 App 输入框会不会接受这个位置（部分 WebView / 自绘输入框会忽略
+     * setSelection，或把光标改写到别处）。若立刻无条件以顶部框为准，
+     * 就会出现"顶部框光标动了、实际插入位置不变"。
+     *
+     * 因此：顶部框光标变化后先置 pending，等目标框上报的光标与之吻合
+     * （见 [FcitxInputMethodService.onUpdateSelection]）才升级为权威；
+     * 若目标框上报了别的位置，说明它没有接受，则丢弃 pending 并跟随目标框。
+     */
+    private var topCursorPending = false
+
+    /** 顶部框光标是否处于"待目标框确认"状态。 */
+    fun isTopCursorPending(): Boolean = topCursorPending
+
+    /**
+     * 记录"顶部框光标已变化，等待目标框确认"，并清掉旧的权威状态。
+     */
+    fun markTopCursorPending() {
+        topCursorPending = true
+        topEditTextAuthoritative = false
+        topCursorSyncIssued = false
+    }
+
+    /**
+     * 目标框上报的光标与顶部框一致 → 确认权威，后续滞后回调不再覆盖顶部框。
+     */
+    fun confirmTopEditTextAuthoritative() {
+        topCursorSyncIssued = false
+        if (!topCursorPending) return
+        topCursorPending = false
+        topEditTextAuthoritative = true
+    }
+
+    /**
+     * 目标框上报的光标与顶部框不一致 → 目标框没有接受顶部框光标，
+     * 丢弃 pending，回到"跟随目标框"的模式。
+     */
+    fun rejectTopCursorPending() {
+        topCursorPending = false
+        topCursorSyncIssued = false
+    }
+
+    // 【Fix】原 isPasswordFieldCleared 字段已删除：密码框改为完全由明文缓存
+    // （cachedPlaintextPassword / passwordCursorPosition）驱动，
+    // 不再需要"是否已清空"这类一次性状态。
 
     // 【Fix】提前声明 themedContext，currentContentEditText 构造时需要用到。
     // 原位置在类体靠后，导致 Kotlin 属性初始化顺序错误（编译报 "must be initialized"）。
@@ -162,6 +297,9 @@ class InputView(
         override fun onSelectionChanged(selStart: Int, selEnd: Int) {
             super.onSelectionChanged(selStart, selEnd)
             if (!isSyncing) {
+                // 用户在顶部框内移动光标 / 编辑后，顶部框进入"光标待确认"状态，
+                // 目标框随后的 onUpdateSelection 若吻合则升级为权威，
+                // 后续目标框上报的旧光标不再覆盖它。
                 syncCursorToTargetInputField(selStart, selEnd)
             }
         }
@@ -531,8 +669,30 @@ class InputView(
         // 未 attach 时焦点无法落地到 ViewRootImpl；非 VISIBLE 时 requestFocus 直接返回 false
         if (!et.isAttachedToWindow) return
         if (et.visibility != View.VISIBLE) return
-        if (et.isFocused) return
-        et.requestFocus()
+        if (!et.isFocused) {
+            et.requestFocus()
+            return
+        }
+        // 【Fix】键盘隐藏再弹出（DecorView visibility 8 → 0）时，et.isFocused 仍为 true，
+        // 但 Editor 的 blink 已被窗口焦点变化 / 窗口重绘挂起，光标不再绘制，
+        // 表现为"顶部框有焦点但看不到光标"。
+        // 这里通过 setCursorVisible(false/true) 强制重走 showCursor()，
+        // 不改变 selection，也不会触发 onSelectionChanged。
+        et.setCursorVisible(false)
+        et.setCursorVisible(true)
+        // 兜底：若 selection 尚未建立（selStart < 0），Editor 不会绘制光标，
+        // 此时把光标收敛到文本末尾，保证光标可见且位置合理。
+        if (et.selectionStart < 0) {
+            val len = et.length()
+            isSyncing = true
+            try {
+                et.setSelection(len)
+            } catch (e: Exception) {
+                Timber.w("Failed to restore top EditText selection: ${e.message}")
+            } finally {
+                isSyncing = false
+            }
+        }
     }
 
     override fun onAttachedToWindow() {
@@ -562,6 +722,9 @@ class InputView(
         if (focusChangeResetKeyboard || !restarting) {
             windowManager.attachWindow(KeyboardWindow)
         }
+        // 【Fix】新的输入会话开始（用户点击了目标 App 的输入框），
+        // 此时以目标框的内容与光标为准，撤销顶部框的权威与待确认状态。
+        clearTopEditTextAuthoritative()
         // 【Fix】将 syncFromTargetInputField 推迟，避免在 onMeasure 期间触发 Binder IPC
         post {
             syncFromTargetInputField()
@@ -598,15 +761,26 @@ class InputView(
 
     fun updateSelection(start: Int, end: Int) {
         broadcaster.onSelectionUpdate(start, end)
-        // 对于密码输入框，始终使用全量同步以确保状态正确
-        if (service.isPasswordInputType()) {
-            if (!isSyncing) syncFromTargetInputField()
-            return
-        }
+        // 【Fix】密码输入框不再做全量 syncFromTargetInputField()：
+        // 原实现每次 onUpdateSelection 都全量同步（3 次 Binder IPC + setText），
+        // 会把用户在顶端框里刚移动的光标又拉回目标框旧光标位置，
+        // 导致"顶部框光标动了、实际插入位置不变"。
+        // 密码框的内容与光标一致性由 handleCursorUpdate 维护的 passwordCursorPosition 保证。
         // 正在拼音组字时（composing 不为空），顶端 EditText 不需要同步目标框内容，
         // 避免 3 次 Binder IPC 阻塞主线程，导致 preedit 预展示延迟
         if (service.isComposing) return
         if (isSyncing) return
+        // 密码框：目标框上报的是掩码文本的坐标，与顶端明文坐标不可直接映射，
+        // 且此时顶端框光标通常就是用户刚设定的值，直接忽略，避免把光标拉回去。
+        if (service.isPasswordInputType()) return
+        // 【Fix】顶部框是光标权威来源时，目标框上报的光标多为滞后/被 App 改写过的值，
+        // 直接忽略，避免把顶部框光标拉走（表现为输入过程中光标跳变）。
+        // 注意：pending 状态（顶部框刚移动光标、目标框尚未确认）不能在此拦截，
+        // 否则第 2 步"目标框确认/拒绝"的判断永远拿不到目标框的真实光标。
+        if (isTopEditTextAuthoritative()) {
+            Timber.v("updateSelection ignored: top EditText is authoritative, target=($start,$end)")
+            return
+        }
         try {
             val currentTextLength = currentContentEditText.length()
             if (start <= currentTextLength && end <= currentTextLength) {
@@ -661,11 +835,48 @@ class InputView(
     }
 
     /**
-     * 重置密码输入框状态，在切换到新的输入框时调用
+     * 重置密码输入框状态，在切换到新的输入框时调用。
+     *
+     * 【Fix】密码框状态全部收敛到明文缓存（由 [FcitxInputMethodService.clearPasswordCache]
+     * 在 onStartInput 中清空），这里不再持有任何独立状态，仅保留调用点以兼容既有流程。
      */
     fun resetPasswordFieldState() {
-        isPasswordFieldCleared = false
-        Timber.d("Password field state reset")
+        Timber.v("Password field state reset")
+    }
+
+    /**
+     * 【Fix】按明文缓存刷新顶部框（密码框唯一的内容/光标来源）。
+     *
+     * 密码框的目标 App 输入框里只有掩码文本，长度与明文缓存不一定相等，
+     * 因此绝不能回读目标框内容/光标来驱动顶部框：
+     *   - 内容：一律取 [FcitxInputMethodService.getTargetInputFieldContent]（明文缓存）
+     *   - 光标：一律取 [FcitxInputMethodService.getPasswordCursorPosition]
+     *
+     * 只在内容变化时 setText + 重设光标；内容一致时保留用户当前光标，
+     * 避免把用户在顶部框里刚移动的光标拉回去。
+     */
+    fun refreshPasswordTopEditText() {
+        if (isSyncing) return
+        val targetContent = service.getTargetInputFieldContent() // 明文缓存
+        val cursorPosition = service.getPasswordCursorPosition()
+        val safePosition = minOf(maxOf(cursorPosition, 0), targetContent.length)
+        isSyncing = true
+        try {
+            val currentEditTextContent = currentContentEditText.text?.toString() ?: ""
+            if (currentEditTextContent != targetContent) {
+                currentContentEditText.setText(targetContent)
+                currentContentEditText.setSelection(safePosition)
+                Timber.d("Password plaintext synced to EditText: ${targetContent.length} chars, cursor=$safePosition")
+            } else if (currentContentEditText.selectionStart != safePosition) {
+                // 内容一致但缓存光标被本端逻辑改动（插入/退格/删除后），需要跟随。
+                currentContentEditText.setSelection(safePosition)
+                Timber.v("Password cursor synced to $safePosition")
+            }
+        } catch (e: Exception) {
+            Timber.w("Failed to refresh password top EditText: ${e.message}")
+        } finally {
+            isSyncing = false
+        }
     }
 
     /**
@@ -677,79 +888,32 @@ class InputView(
         // 正在拼音组字时跳过：composing span 期间顶端 EditText 内容无需同步，
         // 避免 3 次 Binder IPC 与 preedit 更新竞争主线程
         if (service.isComposing) return
-        
+        // 【Fix】顶部框为光标权威来源时，光标由用户/顶部框主导，
+        // 但内容仍需回读目标框：commitText / 退格 / 删除都只改了目标框，
+        // 若这里直接 return，顶部框内容会停在旧文本上（表现为"顶部框不更新"）。
+        // 因此只跳过光标覆盖，内容仍按目标框刷新（见下方 keepTopCursor）。
+
+        // 【Fix】密码框完全不走本方法：目标框里只有掩码（"•••"），
+        // 回读掩码再写进顶部框会让用户看到掩码而不是明文，
+        // 且掩码长度与明文长度不等，光标无法映射。
+        // 密码框的顶部框内容/光标一律由 [refreshPasswordTopEditText] 按明文缓存刷新。
+        if (service.isPasswordInputType()) {
+            refreshPasswordTopEditText()
+            return
+        }
+
         isSyncing = true
         try {
-            // 对于密码输入框的特殊处理
-            if (service.isPasswordInputType()) {
-                // 只在首次进入密码输入框时清空一次
-                if (!isPasswordFieldCleared) {
-                    Timber.d("First time entering password field, clearing content")
-                    
-                    // 清空目标输入框的内容（一次性操作）
-                    val ic = service.currentInputConnection
-                    if (ic != null) {
-                        try {
-                            ic.beginBatchEdit()
-                            // 获取当前文本长度并选择所有内容
-                            val beforeCursor = ic.getTextBeforeCursor(1000, 0)?.length ?: 0
-                            val afterCursor = ic.getTextAfterCursor(1000, 0)?.length ?: 0
-                            val totalLength = beforeCursor + afterCursor
-                            
-                            // 选择所有文本并清空
-                            ic.setSelection(0, totalLength)
-                            ic.commitText("", 1)
-                            ic.endBatchEdit()
-                        } catch (e: Exception) {
-                            Timber.w("Failed to clear password field: ${e.message}")
-                        }
-                    }
-                    
-                    // 清空顶端EditText和密码缓存
-                    currentContentEditText.setText("")
-                    currentContentEditText.setSelection(0)
-                    service.clearPasswordCache()
-                    
-                    // 标记已清空，避免重复清空
-                    isPasswordFieldCleared = true
-                    Timber.d("Password field cleared once, ready for input")
-                    return
-                }
-                
-                // 后续输入时，正常同步密码明文到顶端EditText
-                val targetContent = service.getTargetInputFieldContent()  // 这会返回明文
-                val cursorPosition = service.getTargetInputFieldCursorPosition()
-                
-                // 检查内容长度，避免过长内容
-                if (targetContent.length > 2000) {
-                    Timber.w("Password content too long (${targetContent.length}), truncating to 2000 chars")
-                    val truncatedContent = targetContent.substring(0, 2000)
-                    currentContentEditText.setText(truncatedContent)
-                    currentContentEditText.setSelection(minOf(cursorPosition, truncatedContent.length))
-                } else {
-                    // 同步密码明文到顶端EditText，确保内容和光标位置都正确同步
-                    val currentEditTextContent = currentContentEditText.text?.toString() ?: ""
-                    val currentEditTextCursor = try {
-                        currentContentEditText.selectionStart
-                    } catch (e: Exception) {
-                        0
-                    }
-                    
-                    // 检查内容或光标位置是否需要同步
-                    if (currentEditTextContent != targetContent || currentEditTextCursor != cursorPosition) {
-                        currentContentEditText.setText(targetContent)
-                        val safePosition = minOf(maxOf(cursorPosition, 0), targetContent.length)
-                        currentContentEditText.setSelection(safePosition)
-                        Timber.d("Password plaintext synced to EditText: content=${targetContent.length} chars, cursor=$safePosition")
-                    }
-                }
-                return
-            }
-            
             // 非密码输入框的正常同步逻辑
             val targetContent = service.getTargetInputFieldContent()
             val cursorPosition = service.getTargetInputFieldCursorPosition()
-            
+
+            // 【Fix】顶部框为光标权威时，光标由用户主导，不再用目标框光标覆盖。
+            // 目标框光标（getTextBeforeCursor 长度）在部分 App 上滞后或被改写，
+            // 无条件采用会把顶部框光标拉走，表现为"输入过程中光标跳变"。
+            val keepTopCursor = isTopEditTextAuthoritative()
+            val topCursor = if (keepTopCursor) getTopEditTextCursor() else 0
+
             // 检查内容长度，避免过长内容
             if (targetContent.length > 2000) {
                 Timber.w("Target content too long (${targetContent.length}), truncating to 2000 chars")
@@ -760,10 +924,20 @@ class InputView(
                 // 非密码框，正常内容比较
                 if (currentContentEditText.text?.toString() != targetContent) {
                     currentContentEditText.setText(targetContent)
-                    
+
                     // 设置光标位置，确保不超出文本长度
-                    val safePosition = minOf(cursorPosition, targetContent.length)
+                    val safePosition = if (keepTopCursor) {
+                        minOf(topCursor, targetContent.length)
+                    } else {
+                        minOf(cursorPosition, targetContent.length)
+                    }
                     currentContentEditText.setSelection(safePosition)
+                } else if (!keepTopCursor) {
+                    // 内容一致且顶部框不是权威来源时，才跟随目标框光标
+                    val safePosition = minOf(cursorPosition, targetContent.length)
+                    if (currentContentEditText.selectionStart != safePosition) {
+                        currentContentEditText.setSelection(safePosition)
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -778,7 +952,22 @@ class InputView(
      */
     fun syncToTargetInputField() {
         if (isSyncing) return
-        
+        // 【Fix】密码框：顶部框是明文、目标框是掩码，两侧文本永远不相等，
+        // 若走下面的"内容不同 → 全量替换"逻辑，会把明文直接写进密码框，
+        // 而且每次输入都会触发一次全量替换 + setSelection，导致内容/光标错乱。
+        // 密码框的顶部框只用于展示与定位，实际写入由 commitText/退格路径完成，
+        // 这里仅把顶部框光标记录到明文缓存。
+        if (service.isPasswordInputType()) {
+            val sel = getTopEditTextSelection()
+            if (sel.first == sel.second) {
+                service.setPasswordCursorPosition(sel.first)
+            }
+            return
+        }
+        // 【Fix】顶部框内容变化代表用户主动编辑，但光标位置是否被目标框接受仍需确认：
+        // 这里只进入待确认状态，避免目标框忽略 setSelection 时顶部框光标被"假权威"锁死。
+        markTopCursorPending()
+
         try {
             val currentText = getCurrentContent()
             val cursorPosition = try {
@@ -796,6 +985,8 @@ class InputView(
             // 获取目标输入框的当前内容
             val targetContent = service.getTargetInputFieldContent()
             
+            val safePosition = minOf(maxOf(cursorPosition, 0), currentText.length)
+
             // 如果内容不同，则需要同步
             if (currentText != targetContent) {
                 val ic = service.currentInputConnection ?: return
@@ -809,12 +1000,31 @@ class InputView(
                     ic.commitText(currentText, 0)
                     
                     // 设置光标位置，确保在有效范围内
-                    val safePosition = minOf(maxOf(cursorPosition, 0), currentText.length)
                     ic.setSelection(safePosition, safePosition)
+                    // 【Fix】内容整体替换后同样标记"已发出"，让回声回调不拒掉 pending
+                    markTopCursorSyncIssued()
                     
                     ic.endBatchEdit()
                 } catch (e: Exception) {
                     Timber.w("Failed to sync to target input field: ${e.message}")
+                } finally {
+                    isSyncing = false
+                }
+            } else {
+                // 【Fix】内容一致时也要把光标同步过去。
+                // 顶部框内移动光标后，若目标框光标没跟上（部分输入框忽略 setSelection，
+                // 或 onUpdateSelection 回调晚于下一次 commitText），
+                // 下一次插入就会落在目标框旧光标处，表现为"只有第一个字符插对"。
+                val ic = service.currentInputConnection ?: return
+                if (service.getTargetInputFieldCursorPosition() == safePosition) return
+                isSyncing = true
+                try {
+                    service.predictSelection(safePosition, safePosition)
+                    ic.setSelection(safePosition, safePosition)
+                    // 标记"已发出"，让目标框紧随其后的回声回调不会把 pending 拒掉
+                    markTopCursorSyncIssued()
+                } catch (e: Exception) {
+                    Timber.w("Failed to sync cursor to target input field: ${e.message}")
                 } finally {
                     isSyncing = false
                 }
@@ -830,12 +1040,31 @@ class InputView(
      */
     fun syncCursorToTargetInputField(selStart: Int, selEnd: Int) {
         if (isSyncing) return
-
-        val ic = service.currentInputConnection ?: return
+        // 【Fix】顶部框光标变化只代表"用户想放到这里"，先进入待确认状态，
+        // 由目标框随后的 onUpdateSelection 决定是否升级为权威（见 markTopCursorPending）。
+        markTopCursorPending()
 
         try {
             val safeSelStart = maxOf(selStart, 0)
             val safeSelEnd = maxOf(selEnd, 0)
+
+            // 【Fix】密码框：顶端 EditText 是明文、目标框是掩码，两者长度可能不同，
+            // 直接把顶端框光标 setSelection 到目标框会越界或错位；
+            // 密码框只需把光标位置记录到明文缓存（passwordCursorPosition），
+            // 由 insertTextInPassword / handlePasswordBackspace 按该位置操作，
+            // 目标框光标会在下一次 commitText 时自然跟随。
+            if (service.isPasswordInputType()) {
+                // 密码框不走 pending/权威确认（两侧坐标不可映射），直接撤销，
+                // 避免残留 pending 影响后续普通输入框。
+                clearTopEditTextAuthoritative()
+                if (safeSelStart == safeSelEnd) {
+                    service.setPasswordCursorPosition(safeSelStart)
+                    Timber.v("Password cursor recorded: $safeSelStart")
+                }
+                return
+            }
+
+            val ic = service.currentInputConnection ?: return
 
             // 预先告知 CursorTracker 即将产生此光标事件，使 onUpdateSelection 里
             // selection.consume 能命中预测值，避免触发 fcitx focus(false)/focus(true) 重置
@@ -844,6 +1073,8 @@ class InputView(
             isSyncing = true
             try {
                 ic.setSelection(safeSelStart, safeSelEnd)
+                // 标记"已发出"，让目标框紧随其后的回声回调不会把 pending 拒掉
+                markTopCursorSyncIssued()
                 Timber.v("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd")
             } catch (e: Exception) {
                 Timber.w("Failed to sync cursor to target input field: ${e.message}")
