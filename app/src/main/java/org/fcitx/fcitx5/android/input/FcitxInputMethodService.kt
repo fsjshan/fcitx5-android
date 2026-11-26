@@ -111,15 +111,69 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         selection.predict(start, end)
     }
 
+    /**
+     * 【Fix】顶部框是否为光标权威来源。
+     *
+     * 权威期间目标框上报的滞后光标不得覆盖顶部框光标。
+     */
+    fun isTopEditTextAuthoritative(): Boolean = inputView?.isTopEditTextAuthoritative() == true
+
+    /**
+     * 【Fix】以顶部 EditText 的光标为准，重新对齐本端 [selection] 与目标框光标。
+     *
+     * 目标 App 输入框在收到 setSelection / commitText 后，常常回调一个滞后或被改写的
+     * onUpdateSelection（例如把光标放在插入点+1、或干脆忽略 setSelection），
+     * 若本端一直采信这些回调，下一次插入就会落在错误位置，
+     * 表现为"只有第一个字符插对，后续追加到末尾"和"输入过程中光标跳变"。
+     *
+     * 因此在每次提交/删除之后，用顶部框的真实光标覆盖 [selection]。
+     *
+     * 【Fix2】调用点都在 [syncToTopEditText] 的 post 之前，此刻顶部框内容可能还没更新，
+     * 因此这里只更新 [selection]，真正的目标框 setSelection 推迟到 post 里，
+     * 等顶部框内容刷新后再对齐一次，保证下一次插入点正确。
+     */
+    fun alignSelectionToTopEditText() {
+        val view = inputView ?: return
+        if (isPasswordInputType()) return
+        val (start, end) = view.getTopEditTextSelection()
+        selection.resetTo(start, end)
+        Timber.v("alignSelectionToTopEditText: ($start,$end)")
+        // 顶部框内容由 syncToTopEditText 的 post 更新，等它跑完再对齐一次。
+        // 用 view.post 保证排在 syncToTopEditText 投递的任务之后。
+        // 目标框的 setSelection 只在这里做一次，避免同一帧内两次 Binder 调用。
+        view.post { alignSelectionToTopEditTextNow() }
+    }
+
+    /**
+     * 立即用顶部框光标对齐 [selection] 与目标框光标（不做 post，供 post 块内部调用）。
+     *
+     * 【Fix】setSelection 前先 predictSelection，让目标框随后的 onUpdateSelection 命中预测，
+     * 避免被 CursorTracker 当成"用户输入"而触发 fcitx focus(false)/focus(true) 重置；
+     * 同时标记"已发出"，使紧随其后的回声回调不会把 pending 拒掉。
+     */
+    private fun alignSelectionToTopEditTextNow() {
+        val view = inputView ?: return
+        if (isPasswordInputType()) return
+        val (start, end) = view.getTopEditTextSelection()
+        selection.resetTo(start, end)
+        val ic = currentInputConnection ?: return
+        try {
+            selection.predict(start, end)
+            ic.setSelection(start, end)
+            view.markTopCursorSyncIssued()
+        } catch (e: Exception) {
+            Timber.w("alignSelectionToTopEditTextNow: setSelection failed: ${e.message}")
+        }
+    }
+
     val isComposing: Boolean
         get() = composing.isNotEmpty()
 
     private val composing = CursorRange()
     private var composingText = FormattedText.Empty
 
-    // 密码输入相关
-    private var isPasswordField = false
-    private var plaintextPassword = StringBuilder()
+    // 【Fix】原 isPasswordField / plaintextPassword 字段已删除（无任何读写点），
+    // 密码框状态统一由 cachedPlaintextPassword / passwordCursorPosition 维护。
 
     private fun resetComposingState() {
         composing.clear()
@@ -329,36 +383,107 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     private fun handleDeleteSurrounding(before: Int, after: Int) {
         val ic = currentInputConnection ?: return
 
-        // 如果是密码输入框，跟踪明文密码删除
+        // 【Fix】密码框走专用路径：删除位置只认明文缓存 passwordCursorPosition，
+        // 且删除后必须按明文缓存刷新顶部框（否则顶部框内容不更新）。
         if (isPasswordInputType()) {
-            deleteTextFromPassword(before, after)
+            handleDeleteSurroundingInPassword(before, after)
+            return
         }
 
-        if (before > 0) {
-            selection.predictOffset(-before)
+        // 【Fix】与 commitText 同理：先按本端记录的 selection 定位目标框光标，再删除，
+        // 避免目标框 selection 与顶部 EditText 不一致时删错位置。
+        // 注意 predictOffset 会改变 selection.latest，所以必须在 predict 之前取定位点。
+        val anchor = selection.latest
+        ic.withBatchEdit {
+            if (anchor.isEmpty()) {
+                val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                        (getTextAfterCursor(1000, 0)?.length ?: 0)
+                if (anchor.start in 0..len) {
+                    setSelection(anchor.start, anchor.start)
+                }
+            }
+            if (before > 0) {
+                selection.predictOffset(-before)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                deleteSurroundingTextInCodePoints(before, after)
+            } else {
+                deleteSurroundingText(before, after)
+            }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            ic.deleteSurroundingTextInCodePoints(before, after)
-        } else {
-            ic.deleteSurroundingText(before, after)
-        }
+        // 【Fix】删除后顶部框光标才是权威，用它覆盖本端 selection，
+        // 避免目标框回调的滞后光标把下一次插入点带偏。
+        // 顺序在 syncToTopEditText 之前，保证两次 post 的 FIFO 顺序。
+        alignSelectionToTopEditText()
         // 同步到顶端EditText
         syncToTopEditText()
     }
 
+    /**
+     * 【Fix】密码框专用 deleteSurrounding 路径（明文缓存坐标驱动）。
+     */
+    private fun handleDeleteSurroundingInPassword(before: Int, after: Int) {
+        val ic = currentInputConnection
+        // 【Fix】删除前先取明文光标，掩码定位点必须由它换算，不能删完再取（那时已被改成 start）。
+        val plainCursor = passwordCursorPosition
+        val plainLen = cachedPlaintextPassword.length
+        val plainStart = (plainCursor - before).coerceIn(0, plainLen)
+        val plainEnd = (plainCursor + after).coerceIn(plainStart, plainLen)
+        // 1. 更新明文缓存
+        deleteTextFromPassword(before, after)
+        val cursor = passwordCursorPosition
+        // 2. 目标框按掩码坐标删除
+        if (ic != null) {
+            try {
+                ic.withBatchEdit {
+                    val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                            (getTextAfterCursor(1000, 0)?.length ?: 0)
+                    // 【Fix】明文坐标 → 掩码坐标换算（两者长度可能不等）
+                    val ratio = if (plainLen > 0) len.toFloat() / plainLen.toFloat() else 1f
+                    val maskStart = kotlin.math.floor(plainStart * ratio).toInt().coerceIn(0, len)
+                    val maskEnd = kotlin.math.floor(plainEnd * ratio).toInt().coerceIn(maskStart, len)
+                    val maskBefore = maskStart
+                    val maskAfter = (maskEnd - maskStart).coerceAtLeast(0)
+                    setSelection(maskStart, maskStart)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        deleteSurroundingTextInCodePoints(maskBefore, maskAfter)
+                    } else {
+                        deleteSurroundingText(maskBefore, maskAfter)
+                    }
+                    // 【Fix】删除后重新读取掩码长度，再按新的明文/掩码比例换算光标
+                    val newLen = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                            (getTextAfterCursor(1000, 0)?.length ?: 0)
+                    val newRatio = if (cachedPlaintextPassword.isNotEmpty())
+                        newLen.toFloat() / cachedPlaintextPassword.length.toFloat() else 1f
+                    val maskTarget = kotlin.math.floor(cursor * newRatio).toInt()
+                        .coerceIn(0, maxOf(newLen, 0))
+                    // 【Fix】先 predict 再 setSelection，理由同 commitTextInPassword
+                    selection.predict(maskTarget)
+                    setSelection(maskTarget, maskTarget)
+                }
+            } catch (e: Exception) {
+                Timber.w("handleDeleteSurroundingInPassword: failed to delete: ${e.message}")
+            }
+        }
+        Timber.d("handleDeleteSurroundingInPassword: before=$before after=$after cursor=$cursor")
+        // 3. 顶部框按明文缓存刷新
+        inputView?.refreshPasswordTopEditText()
+    }
+
     private fun handleBackspaceKey() {
+        // 【Fix】密码框走专用路径：目标框是掩码，selection 里的坐标来自掩码文本，
+        // 与明文缓存位置不可映射；删除位置只认 passwordCursorPosition。
+        if (isPasswordInputType()) {
+            handlePasswordBackspaceKey()
+            return
+        }
         val lastSelection = selection.latest
         if (lastSelection.isNotEmpty()) {
             selection.predict(lastSelection.start)
         } else if (lastSelection.start > 0) {
             selection.predictOffset(-1)
         }
-        
-        // 对于密码输入框，在删除前更新密码缓存
-        if (isPasswordInputType()) {
-            handlePasswordBackspace(lastSelection)
-        }
-        
+
         // In practice nobody (apart form ourselves) would set `privateImeOptions` to our
         // `DeleteSurroundingFlag`, leading to a behavior of simulating backspace key pressing
         // in almost every EditText.
@@ -366,6 +491,8 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             currentInputEditorInfo.inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL
         ) {
             sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+            // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
+            alignSelectionToTopEditText()
             // 同步到顶端EditText
             syncToTopEditText()
             return
@@ -373,50 +500,120 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         if (lastSelection.isEmpty()) {
             if (lastSelection.start <= 0) {
                 sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+                // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
+                alignSelectionToTopEditText()
                 // 同步到顶端EditText
                 syncToTopEditText()
                 return
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                currentInputConnection.deleteSurroundingTextInCodePoints(1, 0)
-            } else {
-                currentInputConnection.deleteSurroundingText(1, 0)
+            currentInputConnection.withBatchEdit {
+                // 【Fix】先按本端 selection 定位目标框光标，再删除，避免删错位置
+                val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                        (getTextAfterCursor(1000, 0)?.length ?: 0)
+                if (lastSelection.start in 0..len) {
+                    setSelection(lastSelection.start, lastSelection.start)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    deleteSurroundingTextInCodePoints(1, 0)
+                } else {
+                    deleteSurroundingText(1, 0)
+                }
             }
         } else {
-            currentInputConnection.commitText("", 0)
+            currentInputConnection.withBatchEdit {
+                val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                        (getTextAfterCursor(1000, 0)?.length ?: 0)
+                if (lastSelection.start in 0..len && lastSelection.end <= len) {
+                    setSelection(lastSelection.start, lastSelection.end)
+                }
+                commitText("", 0)
+            }
         }
+        // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
+        alignSelectionToTopEditText()
         // 同步到顶端EditText
         syncToTopEditText()
     }
     
     /**
-     * 处理密码输入框的退格删除操作
+     * 【Fix】密码框专用退格路径。
+     *
+     * 删除位置只认明文缓存 [passwordCursorPosition]（顶部框明文坐标），
+     * 目标框按同一位置（掩码坐标，需收敛）删除，最后按明文缓存刷新顶部框。
      */
-    private fun handlePasswordBackspace(selection: CursorRange) {
-        try {
-            if (selection.isNotEmpty()) {
-                // 有选中内容，删除选中范围
-                val startPos = selection.start
-                val endPos = selection.end
-                if (startPos >= 0 && startPos < cachedPlaintextPassword.length && endPos <= cachedPlaintextPassword.length) {
-                    cachedPlaintextPassword = cachedPlaintextPassword.removeRange(startPos, endPos)
-                    passwordCursorPosition = startPos
-                    Timber.d("Password backspace: removed selection from $startPos to $endPos")
-                }
-            } else {
-                // 无选中内容，删除光标前一个字符
-                val cursorPos = selection.start
-                if (cursorPos > 0 && cursorPos <= cachedPlaintextPassword.length) {
-                    cachedPlaintextPassword = cachedPlaintextPassword.removeRange(cursorPos - 1, cursorPos)
-                    passwordCursorPosition = cursorPos - 1
-                    Timber.d("Password backspace: removed character at position ${cursorPos - 1}")
-                }
-            }
-        } catch (e: Exception) {
-            Timber.w("Failed to handle password backspace: ${e.message}")
-            // 如果处理失败，清空缓存以避免不一致
-            clearPasswordCache()
+    private fun handlePasswordBackspaceKey() {
+        val ic = currentInputConnection
+        val cursor = passwordCursorPosition
+        val plainLen = cachedPlaintextPassword.length
+        if (cursor <= 0 || plainLen == 0) {
+            // 明文缓存已空：仍把 DEL 发给目标框，保证行为与系统一致
+            sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+            inputView?.refreshPasswordTopEditText()
+            return
         }
+        // 1. 更新明文缓存
+        cachedPlaintextPassword = cachedPlaintextPassword.removeRange(cursor - 1, cursor)
+        passwordCursorPosition = cursor - 1
+        Timber.d("Password backspace: removed char at ${cursor - 1}, cursor=$passwordCursorPosition")
+        // 2. 目标框按掩码坐标删除
+        if (ic != null) {
+            try {
+                ic.withBatchEdit {
+                    val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                            (getTextAfterCursor(1000, 0)?.length ?: 0)
+                    // 【Fix】明文光标 → 掩码光标换算（掩码长度可能与明文长度不等）
+                    val ratio = if (plainLen > 0) len.toFloat() / plainLen.toFloat() else 1f
+                    val maskPos = kotlin.math.floor(cursor * ratio).toInt().coerceIn(0, len)
+                    setSelection(maskPos, maskPos)
+                    // 【Fix】删除长度按"掩码每字符代表多少明文"换算：
+                    //  - 掩码比明文短（如整段只显示 1 个字符）：只有删完最后一个明文字符时才删 1 个掩码字符，
+                    //    否则删 0 个，避免把整段密码一起删掉；
+                    //  - 掩码比明文长（代理对等）：至少删 1 个。
+                    val maskCount = if (len >= plainLen) {
+                        // 掩码每字符对应 len/plainLen 个明文字符，至少 1 个
+                        val per = (len.toFloat() / plainLen.toFloat()).toInt().coerceAtLeast(1)
+                        per
+                    } else {
+                        // 掩码比明文短：只有明文删完（plainLen-1 == 0）才删 1 个掩码字符
+                        if (plainLen - 1 <= 0) 1 else 0
+                    }.coerceAtMost(maskPos)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        deleteSurroundingTextInCodePoints(maskCount, 0)
+                    } else {
+                        deleteSurroundingText(maskCount, 0)
+                    }
+                    // 【Fix】删除后重新读取掩码长度，再按新比例换算光标
+                    val newLen = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                            (getTextAfterCursor(1000, 0)?.length ?: 0)
+                    val newRatio = if (cachedPlaintextPassword.isNotEmpty())
+                        newLen.toFloat() / cachedPlaintextPassword.length.toFloat() else 1f
+                    val maskTarget = kotlin.math.floor(passwordCursorPosition * newRatio).toInt()
+                        .coerceIn(0, maxOf(newLen, 0))
+                    // 【Fix】先 predict 再 setSelection，理由同 commitTextInPassword
+                    selection.predict(maskTarget)
+                    setSelection(maskTarget, maskTarget)
+                }
+            } catch (e: Exception) {
+                Timber.w("handlePasswordBackspaceKey: failed to delete: ${e.message}")
+            }
+        }
+        // 3. 顶部框按明文缓存刷新
+        inputView?.refreshPasswordTopEditText()
+    }
+
+    /**
+     * 删除密码缓存中的一段文本（供 [deleteSelection] 使用）。
+     *
+     * 【注意】传入的 start/end 必须是**明文坐标**。密码框顶部框就是明文，
+     * 因此直接取顶部框选区即可，不能用 [selection]（掩码坐标）。
+     */
+    private fun deletePasswordRange(start: Int, end: Int) {
+        val safeStart = start.coerceIn(0, cachedPlaintextPassword.length)
+        val safeEnd = end.coerceIn(safeStart, cachedPlaintextPassword.length)
+        if (safeStart == safeEnd) return
+        cachedPlaintextPassword = cachedPlaintextPassword.removeRange(safeStart, safeEnd)
+        passwordCursorPosition = safeStart
+        Timber.d("Password range deleted: [$safeStart,$safeEnd), cursor=$passwordCursorPosition")
     }
 
     fun handleReturnKey() {
@@ -464,11 +661,16 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     fun commitText(text: String, cursor: Int = -1) {
         val ic = currentInputConnection ?: return
         Timber.i("[IMS] commitText: text='$text' cursor=$cursor composingEmpty=${composing.isEmpty()}")
-        // 如果是密码输入框，跟踪明文密码
+        // 【Fix】密码框走专用路径：
+        // 顶部框是明文、目标框是掩码，两侧坐标不可映射，通用的
+        // "selection.latest + setSelection(start) + commitText" 逻辑会把插入点算错
+        // （selection.latest 来自掩码坐标，而明文缓存位置由 passwordCursorPosition 维护）。
+        // 这里统一以明文缓存位置为插入点，写入后按明文缓存刷新顶部框。
         if (isPasswordInputType()) {
-            insertTextInPassword(text)
+            commitTextInPassword(text)
+            return
         }
-        
+
         // when composing text equals commit content, finish composing text as-is
         if (composing.isNotEmpty() && composingText.toString() == text) {
             val c = if (cursor == -1) text.length else cursor
@@ -481,6 +683,9 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 }
                 ic.finishComposingText()
             }
+            // 【Fix】先按顶部框光标对齐本端 selection，再投递顶部框内容同步，
+            // 保证 syncToTopEditText 的 post 里对齐的是最新插入点。
+            alignSelectionToTopEditText()
             // 同步到顶端EditText
             syncToTopEditText()
             return
@@ -490,8 +695,27 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         val start = if (composing.isEmpty()) selection.latest.start else composing.start
         resetComposingState()
         if (cursor == -1) {
-            selection.predict(start + text.length)
-            ic.commitText(text, 1)
+            // 【Fix】不能只依赖目标输入框自身的 selection 做插入。
+            // 顶部 EditText 移动光标后，本端 selection.latest 已更新到新位置，
+            // 但目标 App 输入框的 selection 并不一定同步到位（部分输入框忽略 setSelection，
+            // 或 onUpdateSelection 回调晚于下一次 commitText），
+            // 于是第一次插入落在正确位置，之后目标框光标停在插入点+1，
+            // 而 selection.latest 又被 syncToTopEditText 的 post 拉回，
+            // 表现为"只有第一个字符插对，后续字符都追加到末尾"。
+            // 这里显式把目标框 selection 定位到 start 再插入，保证插入点与顶部框一致。
+            val target = start + text.length
+            selection.predict(target)
+            ic.withBatchEdit {
+                // 只有当 start 落在目标框当前文本范围内时才定位，避免越界异常
+                val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                        (getTextAfterCursor(1000, 0)?.length ?: 0)
+                if (start in 0..len) {
+                    setSelection(start, start)
+                }
+                commitText(text, 1)
+                // 目标框可能把光标留在插入点之后，这里再对齐一次，避免后续插入漂移
+                setSelection(target, target)
+            }
         } else {
             val target = start + cursor
             selection.predict(target)
@@ -500,8 +724,76 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 setSelection(target, target)
             }
         }
+        // 【Fix】插入后以顶部框光标为准，覆盖目标框可能上报的滞后光标。
+        // 顺序必须在 syncToTopEditText 之前：alignSelection 内部会 post 一次对齐，
+        // 与 syncToTopEditText 的 post 保持 FIFO，先刷新顶部框内容再对齐目标框。
+        alignSelectionToTopEditText()
         // 同步到顶端EditText
         syncToTopEditText()
+    }
+
+    /**
+     * 【Fix】密码框专用提交路径。
+     *
+     * 密码框的顶部框是明文、目标框是掩码，两侧长度/坐标不可映射，
+     * 因此插入点只认明文缓存 [passwordCursorPosition]，不认 [selection]。
+     *
+     * 流程：
+     *  1. 先按明文位置更新明文缓存（[insertTextInPassword]），得到新的明文与光标；
+     *  2. 把目标框光标定位到同一位置（掩码坐标，需按掩码实际长度收敛），
+     *     再 commitText 写入，最后把目标框光标放到插入点之后；
+     *  3. 用明文缓存刷新顶部框内容与光标（[InputView.refreshPasswordTopEditText]）。
+     */
+    private fun commitTextInPassword(text: String) {
+        val ic = currentInputConnection ?: return
+        // 【Fix】必须记录插入前的明文长度与光标：insertTextInPassword 内部可能截断文本
+        // （>100 字符）或在超 10000 时清空缓存，此时用 passwordCursorPosition - text.length 反推会错。
+        val prevPlainLen = cachedPlaintextPassword.length
+        val insertPos = passwordCursorPosition
+        // 1. 更新明文缓存（内部会把 passwordCursorPosition 推进到插入点之后）
+        insertTextInPassword(text)
+        val target = passwordCursorPosition
+        // 实际写入的明文长度（截断/清空后仍准确）：目标框只写这么多字符
+        val insertedLen = (cachedPlaintextPassword.length - prevPlainLen).coerceAtLeast(0)
+        val safeText = if (insertedLen in 1 until text.length) text.substring(0, insertedLen) else text
+        resetComposingState()
+        // 2. 目标框按掩码坐标写入
+        try {
+            ic.withBatchEdit {
+                val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                        (getTextAfterCursor(1000, 0)?.length ?: 0)
+                // 【Fix】明文插入点 → 掩码插入点换算：掩码长度可能与明文长度不等
+                // （部分 App 用单个字符表示整段密码，或掩码是代理对），
+                // 直接拿明文坐标 setSelection 会越界或被 App 收敛到末尾，导致插入位置错乱。
+                val plainLen = prevPlainLen
+                val ratio = if (plainLen > 0) len.toFloat() / plainLen.toFloat() else 1f
+                // 【Fix】明文坐标 → 掩码坐标统一用 floor 并收敛，避免四舍五入越过插入点
+                val maskPos = kotlin.math.floor(insertPos * ratio).toInt().coerceIn(0, len)
+                setSelection(maskPos, maskPos)
+                commitText(safeText, 1)
+                // 目标框可能把光标留在别处，这里按掩码长度再收敛一次
+                // 【Fix】新掩码长度 = 插入后重新读取（App 可能只写 1 个掩码字符，
+                // 因此用实际长度更可靠；读不到时退回 旧长度 + 明文实际插入长度）
+                val newLen = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                        (getTextAfterCursor(1000, 0)?.length ?: 0)
+                // 明文光标 → 掩码光标换算，不能直接用 target（明文坐标）
+                val newRatio = if (cachedPlaintextPassword.isNotEmpty())
+                    newLen.toFloat() / cachedPlaintextPassword.length.toFloat() else 1f
+                val maskTarget = kotlin.math.floor(target * newRatio).toInt()
+                    .coerceIn(0, maxOf(newLen, 0))
+                // 【Fix】必须先 predict 再 setSelection：predict 只登记"预期光标"，
+                // 不改变 selection.latest；若在 setSelection 之后 predict，
+                // 目标框的 onUpdateSelection 回调可能在 predict 之前就到达，
+                // 从而被 CursorTracker 当成"用户输入"触发 fcitx focus 重置。
+                selection.predict(maskTarget)
+                setSelection(maskTarget, maskTarget)
+            }
+        } catch (e: Exception) {
+            Timber.w("commitTextInPassword: failed to commit: ${e.message}")
+        }
+        Timber.d("commitTextInPassword: text='$text' insertPos=$insertPos cursor=$passwordCursorPosition")
+        // 3. 顶部框按明文缓存刷新
+        inputView?.refreshPasswordTopEditText()
     }
 
     private fun sendDownKeyEvent(eventTime: Long, keyEventCode: Int, metaState: Int = 0) {
@@ -537,45 +829,82 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     fun deleteSelection() {
+        // 【Fix】密码框走专用路径：selection 是掩码坐标，删除范围必须取顶部框明文选区。
+        if (isPasswordInputType()) {
+            deleteSelectionInPassword()
+            return
+        }
         val lastSelection = selection.latest
         if (lastSelection.isEmpty()) return
-        
-        // 对于密码输入框，需要特殊处理删除操作
-        if (isPasswordInputType()) {
-            handlePasswordDeletion(lastSelection)
-        }
-        
+
         selection.predict(lastSelection.start)
         currentInputConnection?.commitText("", 1)
-        
+
+        // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
+        alignSelectionToTopEditText()
         // 删除操作后同步到顶端EditText
         syncToTopEditText()
     }
-    
+
     /**
-     * 处理密码输入框的删除操作
+     * 【Fix】密码框专用选区删除。
+     *
+     * 删除范围取顶部框明文选区（顶部框就是明文），目标框按同一位置（掩码坐标收敛）删除，
+     * 最后按明文缓存刷新顶部框。
      */
-    private fun handlePasswordDeletion(selection: CursorRange) {
-        try {
-            val deleteLength = selection.end - selection.start
-            if (deleteLength <= 0) return
-            
-            // 更新密码缓存：删除对应位置的字符
-            val startPos = selection.start
-            if (startPos >= 0 && startPos < cachedPlaintextPassword.length) {
-                val endPos = minOf(selection.end, cachedPlaintextPassword.length)
-                cachedPlaintextPassword = cachedPlaintextPassword.removeRange(startPos, endPos)
-                
-                // 更新光标位置
-                passwordCursorPosition = startPos
-                
-                Timber.d("Password deletion: removed ${endPos - startPos} characters at position $startPos")
-            }
-        } catch (e: Exception) {
-            Timber.w("Failed to handle password deletion: ${e.message}")
-            // 如果处理失败，清空缓存以避免不一致
-            clearPasswordCache()
+    private fun deleteSelectionInPassword() {
+        val view = inputView
+        val (start, end) = view?.getTopEditTextSelection() ?: (0 to 0)
+        if (start == end) return
+        // 【Fix】目标框里是掩码文本，长度与明文缓存不一定相等（掩码替换 / Unicode / 部分 App
+        // 用单个字符表示整段密码），因此不能把明文选区 [start,end) 直接当掩码坐标用。
+        // 这里按"明文长度 → 掩码长度"的比例换算删除范围，保证删掉的字符数与明文一致。
+        val plainLen = cachedPlaintextPassword.length
+        val ic = currentInputConnection
+        val maskLen = if (ic != null) {
+            (ic.getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                    (ic.getTextAfterCursor(1000, 0)?.length ?: 0)
+        } else {
+            plainLen
         }
+        val maskStart: Int
+        val maskEnd: Int
+        if (plainLen <= 0 || maskLen == plainLen) {
+            maskStart = start.coerceIn(0, maskLen)
+            maskEnd = end.coerceIn(maskStart, maskLen)
+        } else {
+            val ratio = maskLen.toFloat() / plainLen.toFloat()
+            maskStart = kotlin.math.floor(start * ratio).toInt().coerceIn(0, maskLen)
+            // 【Fix】end 用 ceil：否则掩码比明文短时会漏删尾部字符
+            maskEnd = kotlin.math.ceil(end * ratio).toInt().coerceIn(maskStart, maskLen)
+        }
+        // 1. 更新明文缓存（明文坐标）
+        deletePasswordRange(start, end)
+        val cursor = passwordCursorPosition
+        // 2. 目标框按换算后的掩码坐标删除
+        if (ic != null) {
+            try {
+                ic.withBatchEdit {
+                    setSelection(maskStart, maskEnd)
+                    commitText("", 1)
+                    // 【Fix】删除后重新读取掩码长度，再按新比例换算光标
+                    val newLen = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                            (getTextAfterCursor(1000, 0)?.length ?: 0)
+                    val newRatio = if (cachedPlaintextPassword.isNotEmpty())
+                        newLen.toFloat() / cachedPlaintextPassword.length.toFloat() else 1f
+                    val maskTarget = kotlin.math.floor(cursor * newRatio).toInt()
+                        .coerceIn(0, maxOf(newLen, 0))
+                    // 【Fix】先 predict 再 setSelection，理由同 commitTextInPassword
+                    selection.predict(maskTarget)
+                    setSelection(maskTarget, maskTarget)
+                }
+            } catch (e: Exception) {
+                Timber.w("deleteSelectionInPassword: failed to delete: ${e.message}")
+            }
+        }
+        Timber.d("deleteSelectionInPassword: plain=[$start,$end) mask=[$maskStart,$maskEnd) cursor=$cursor")
+        // 3. 顶部框按明文缓存刷新
+        view?.refreshPasswordTopEditText()
     }
 
     fun sendCombinationKeyEvents(
@@ -600,6 +929,34 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     fun applySelectionOffset(offsetStart: Int, offsetEnd: Int = 0) {
+        // 【Fix】密码框：selection 里是掩码坐标，不能拿来做偏移基准，
+        // 否则方向键移动会按掩码长度漂移。这里以明文缓存光标为基准，
+        // 只更新明文缓存并刷新顶部框，目标框光标由下一次写入时再定位。
+        if (isPasswordInputType()) {
+            val plainLen = cachedPlaintextPassword.length
+            passwordCursorPosition = (passwordCursorPosition + offsetStart).coerceIn(0, plainLen)
+            // 【Fix】同时把目标框光标按比例挪到对应掩码位置：
+            // 否则用户移动光标后，若目标 App 在 commitText 时忽略 setSelection，
+            // 插入点会仍停在旧位置（顶部框光标动了、实际插入位置不变）。
+            val ic = currentInputConnection
+            if (ic != null) {
+                try {
+                    ic.withBatchEdit {
+                        val maskLen = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
+                                (getTextAfterCursor(1000, 0)?.length ?: 0)
+                        val ratio = if (plainLen > 0) maskLen.toFloat() / plainLen.toFloat() else 1f
+                        val maskPos = kotlin.math.floor(passwordCursorPosition * ratio).toInt()
+                            .coerceIn(0, maskLen)
+                        selection.predict(maskPos)
+                        setSelection(maskPos, maskPos)
+                    }
+                } catch (e: Exception) {
+                    Timber.w("applySelectionOffset(password): setSelection failed: ${e.message}")
+                }
+            }
+            inputView?.refreshPasswordTopEditText()
+            return
+        }
         val lastSelection = selection.latest
         currentInputConnection?.also {
             val start = max(lastSelection.start + offsetStart, 0)
@@ -607,15 +964,31 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             if (start > end) return
             selection.predict(start, end)
             it.setSelection(start, end)
+            // 【Fix】目标框光标由本端显式移动；顶部框随后会跟随（见 syncToTopEditText），
+            // 但若目标框忽略 setSelection，顶部框会被拉回旧光标。因此这里置 pending：
+            // 目标框接受则升级为权威，不接受则跟随目标框，避免两侧长期不一致。
+            inputView?.markTopCursorPending()
+            inputView?.markTopCursorSyncIssued()
+            syncToTopEditText()
         }
     }
 
     fun cancelSelection() {
+        // 【Fix】密码框：selection 是掩码坐标，取消选区只需把顶部框恢复成明文光标，
+        // 不能把掩码坐标写进明文缓存。
+        if (isPasswordInputType()) {
+            inputView?.refreshPasswordTopEditText()
+            return
+        }
         val lastSelection = selection.latest
         if (lastSelection.isEmpty()) return
         val end = lastSelection.end
         selection.predict(end)
         currentInputConnection?.setSelection(end, end)
+        // 【Fix】同 applySelectionOffset：置 pending + 已发出，由目标框回调裁决
+        inputView?.markTopCursorPending()
+        inputView?.markTopCursorSyncIssued()
+        syncToTopEditText()
     }
 
     /**
@@ -700,6 +1073,9 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
      */
     fun getTargetInputFieldCursorPosition(): Int {
         val ic = currentInputConnection ?: return 0
+        // 【Fix】密码框的掩码文本长度与明文缓存长度可能不一致（掩码替换、Unicode 等），
+        // 直接返回明文缓存中的光标位置，避免顶端 EditText 光标错位。
+        if (isPasswordInputType()) return passwordCursorPosition
         return try {
             // 使用更保守的最大长度限制
             val maxLength = 1000
@@ -746,6 +1122,18 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             } catch (e: Exception) {
                 Timber.w("Failed to sync to top EditText: ${e.message}")
             }
+            // 【Fix】顶部框内容已刷新，此时再以顶部框光标对齐一次目标框，
+            // 保证下一次插入点与用户看到的插入符一致。
+            // 注意：pending（顶部框刚移动光标、目标框尚未确认）时也要对齐，
+            // 否则目标框忽略 setSelection 的场景下插入点会一直停在旧位置。
+            val v = inputView
+            // 【Fix】密码框不走权威/待确认状态机（两侧坐标不可映射），
+            // 目标框光标已由各写入路径自行定位，这里不再对齐，避免用掩码坐标覆盖明文缓存。
+            if (v != null && !isPasswordInputType() &&
+                (v.isTopEditTextAuthoritative() || v.isTopCursorPending())
+            ) {
+                alignSelectionToTopEditTextNow()
+            }
         }
     }
 
@@ -754,6 +1142,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
      */
     fun isPasswordInputType(): Boolean {
         val inputType = currentInputEditorInfo.inputType
+        // 【Fix】TYPE_TEXT_VARIATION_PASSWORD 等变体位只在 CLASS 为 TYPE_CLASS_TEXT 时才有效。
+        // 若不做 CLASS 判断，形如 inputType=163969（CLASS_NUMBER + 0x80 位）的普通数字框
+        // 会被误判为密码框，从而走掩码缓存路径，导致光标/内容同步异常。
+        if (inputType and InputType.TYPE_MASK_CLASS != InputType.TYPE_CLASS_TEXT) {
+            return false
+        }
         return (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
                (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
                (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
@@ -785,6 +1179,22 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     /**
+     * 获取密码框明文缓存中的光标位置（供 InputView 同步顶端 EditText 光标使用）
+     */
+    fun getPasswordCursorPosition(): Int = passwordCursorPosition
+
+    /**
+     * 设置密码框明文缓存中的光标位置（供 InputView 在顶端 EditText 移动光标时调用）
+     */
+    fun setPasswordCursorPosition(position: Int) {
+        val safe = position.coerceIn(0, cachedPlaintextPassword.length)
+        if (passwordCursorPosition != safe) {
+            passwordCursorPosition = safe
+            Timber.d("Password cursor set to $safe")
+        }
+    }
+
+    /**
      * 获取明文密码
      */
     private fun getPlaintextPassword(): String {
@@ -793,13 +1203,8 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         return cachedPlaintextPassword
     }
 
-    /**
-     * 更新明文密码缓存
-     */
-    private fun updatePlaintextPassword(newText: String) {
-        cachedPlaintextPassword = newText
-        passwordCursorPosition = newText.length
-    }
+    // 【Fix】原 updatePlaintextPassword() 已删除：无任何调用点，
+    // 且它会无条件把光标推到末尾，与"明文缓存 + 光标"分离维护的模型冲突。
 
     /**
      * 在密码中插入文本
@@ -852,10 +1257,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     /**
-     * 清空密码缓存
-     */
-    /**
-     * 清空密码缓存（公共方法，供InputView调用）
+     * 清空密码缓存（公共方法，供 InputView 调用）
      */
     fun clearPasswordCache() {
         cachedPlaintextPassword = ""
@@ -1121,10 +1523,14 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         // 如果是密码输入框且已有内容，初始化密码缓存
         if (isPasswordInputType()) {
             initializePasswordCacheFromExistingContent()
+            Timber.d("onStartInput: password cache len=${cachedPlaintextPassword.length} cursor=$passwordCursorPosition")
         }
         
         val flags = CapabilityFlags.fromEditorInfo(attribute)
         capabilityFlags = flags
+        // 【Fix】新的输入会话开始：撤销顶部框的光标权威状态，
+        // 后续以目标 App 输入框上报的内容/光标为准。
+        inputView?.clearTopEditTextAuthoritative()
         Timber.d("onStartInput: initialSel=${selection.current}, restarting=$restarting")
         // wait until InputContext created/activated
         postFcitxJob {
@@ -1173,6 +1579,28 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         cursorUpdateIndex += 1
         Timber.d("onUpdateSelection: old=[$oldSelStart,$oldSelEnd] new=[$newSelStart,$newSelEnd]")
         handleCursorUpdate(newSelStart, newSelEnd, cursorUpdateIndex)
+        // 【Fix】顶部框光标"待确认"状态在这里裁决：
+        // 目标框上报的光标与顶部框一致 → 确认顶部框权威（后续滞后回调不再覆盖）；
+        // 不一致 → 说明目标框没接受顶部框的 setSelection，丢弃 pending，跟随目标框。
+        // 必须在 updateSelection 之前处理，保证同一回调内状态一致。
+        // 组字期间（composing 非空）顶部框内容不跟随目标框，两侧坐标无意义，跳过裁决。
+        // 【Fix】"拒绝"只对顶部框主动发起的 setSelection 生效（pending 且未标记为已发出）：
+        // 若顶部框刚把光标同步给目标框，目标框紧接着回调一个旧光标，会立刻把 pending 拒掉，
+        // 导致后续滞后回调继续覆盖顶部框（表现为光标跳变）。因此顶部框发出的 setSelection
+        // 先标记为"已发出"，其后的第一个回调视为回声（一致则确认，不一致则忽略），
+        // 只有再往后的回调才允许拒绝。
+        val view = inputView
+        if (view != null && !isPasswordInputType() && !isComposing) {
+            val (topStart, topEnd) = view.getTopEditTextSelection()
+            if (topStart == newSelStart && topEnd == newSelEnd) {
+                view.confirmTopEditTextAuthoritative()
+            } else if (view.isTopCursorSyncIssued()) {
+                view.markTopCursorSyncEchoConsumed()
+                Timber.v("onUpdateSelection: ignore echo ($newSelStart,$newSelEnd), top=($topStart,$topEnd)")
+            } else {
+                view.rejectTopCursorPending()
+            }
+        }
         inputView?.updateSelection(newSelStart, newSelEnd)
     }
 
@@ -1243,19 +1671,26 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     private fun handleCursorUpdate(newSelStart: Int, newSelEnd: Int, updateIndex: Int) {
-        if (selection.consume(newSelStart, newSelEnd)) {
-            return // do nothing if prediction matches
-        } else {
+        val predicted = selection.consume(newSelStart, newSelEnd)
+        if (!predicted) {
             // cursor update can't match any prediction: it's treated as a user input
             selection.resetTo(newSelStart, newSelEnd)
-
-            // 如果是密码输入框，且不是预测的光标移动，则更新密码光标位置
-            // 这是为了处理用户手动点击输入框移动光标的情况
-            if (isPasswordInputType()) {
-                if (newSelStart == newSelEnd && newSelStart >= 0 && newSelStart <= cachedPlaintextPassword.length) {
-                    passwordCursorPosition = newSelStart
-                    Timber.d("User moved cursor in password field: $passwordCursorPosition")
-                }
+        }
+        // 【Fix】密码框光标位置必须无条件跟随，无论这次 onUpdateSelection 是否命中预测。
+        // 原实现把 passwordCursorPosition 的更新放在 `else`（未命中预测）分支里，
+        // 而顶端 EditText 移动光标时 syncCursorToTargetInputField() 会先 predictSelection()，
+        // 于是回调必然命中预测 → 提前 return → passwordCursorPosition 永远不更新，
+        // 后续 insertTextInPassword() 仍按旧位置插入，表现为"顶部框光标动了、插入位置不变"。
+        // 注意：目标框上报的是掩码坐标，长度可能大于明文缓存，这里用 coerce 兜底。
+        // 【Fix2】但本端主动写入（commitText / 退格 / 删除 / 顶部框移动光标）之后，
+        // 目标框会回调一个由掩码文本算出的坐标，此时明文缓存才是真相，
+        // 若仍无条件覆盖，会把刚设定好的明文光标拉偏（表现为"移动光标后插入位置不对"）。
+        // 因此只在本端未主动发起的回调（!predicted）上跟随目标框。
+        if (isPasswordInputType() && !predicted && newSelStart == newSelEnd && newSelStart >= 0) {
+            val safe = newSelStart.coerceAtMost(cachedPlaintextPassword.length)
+            if (passwordCursorPosition != safe) {
+                passwordCursorPosition = safe
+                Timber.d("Password cursor position updated: $passwordCursorPosition")
             }
         }
         // skip selection range update, we only care about selection cursor (zero width) here
