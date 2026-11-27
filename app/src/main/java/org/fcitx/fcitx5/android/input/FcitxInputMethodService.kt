@@ -135,9 +135,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     fun alignSelectionToTopEditText() {
         val view = inputView ?: return
         if (isPasswordInputType()) return
-        val (start, end) = view.getTopEditTextSelection()
+        // 【Fix】必须用"权威选区"而不是顶部框当前选区：
+        // 顶部框内容由 syncToTopEditText 的 post 异步刷新，此刻读到的通常是插入前的旧光标，
+        // 用它 resetTo 会把目标框 setSelection 回旧位置（光标停在新增字符之前 / 退格错位）。
+        val (start, end) = view.getAuthoritativeSelection()
         selection.resetTo(start, end)
-        Timber.v("alignSelectionToTopEditText: ($start,$end)")
+        Timber.i("alignSelectionToTopEditText: ($start,$end)")
         // 顶部框内容由 syncToTopEditText 的 post 更新，等它跑完再对齐一次。
         // 用 view.post 保证排在 syncToTopEditText 投递的任务之后。
         // 目标框的 setSelection 只在这里做一次，避免同一帧内两次 Binder 调用。
@@ -154,13 +157,33 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     private fun alignSelectionToTopEditTextNow() {
         val view = inputView ?: return
         if (isPasswordInputType()) return
-        val (start, end) = view.getTopEditTextSelection()
+        // 【Fix】同 alignSelectionToTopEditText：权威期间以"本端显式推进的光标"为准，
+        // 顶部框当前光标可能还没被 post 刷新成新值。
+        val (start, end) = view.getAuthoritativeSelection()
         selection.resetTo(start, end)
+        // 【Fix】目标框光标已在本端写入路径中显式 setSelection 过（commitText / 退格 / 删除），
+        // 这里若再发一次 setSelection，会额外产生一次 Binder IPC 和一次回声回调，
+        // 反而给"光标跳变"制造机会。因此只在目标框上报的光标与权威光标不一致时才补发。
+        // 【Fix】短路判定必须排除"目标框光标已失效"的情况：目标框上报过与权威光标
+        // 不一致的位置（App 改写 / 忽略 setSelection）时，lastTargetCursor 只是旧值，
+        // 若仍据此跳过 setSelection，目标框会永远停在错误位置
+        // （表现为"输入后光标停在新增字符之前"）。
+        if (start == end && view.isTargetCursorConfirmed(start)) {
+            // 【Fix】目标框已在权威位置：把本端 selection 的预测队列也收敛到该值，
+            // 避免队列里残留的旧预测让下一次 onUpdateSelection 误判为"用户输入"，
+            // 进而触发 fcitx focus(false)/focus(true) 重置（表现为偶发光标跳变）。
+            selection.resetTo(start, end)
+            Timber.i("alignSelectionToTopEditTextNow: target already at $start, skip setSelection")
+            return
+        }
         val ic = currentInputConnection ?: return
         try {
             selection.predict(start, end)
             ic.setSelection(start, end)
-            view.markTopCursorSyncIssued()
+            // 【Fix】这里是主动移动光标：目标框若忽略 setSelection 或把光标改写到别处，
+            // 其不一致回调应视为回声忽略一次，避免权威光标被拉偏。
+            view.markTopCursorSyncIssued(ignoreMismatch = true)
+            Timber.i("alignSelectionToTopEditTextNow: setSelection ($start,$end)")
         } catch (e: Exception) {
             Timber.w("alignSelectionToTopEditTextNow: setSelection failed: ${e.message}")
         }
@@ -394,6 +417,8 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         // 避免目标框 selection 与顶部 EditText 不一致时删错位置。
         // 注意 predictOffset 会改变 selection.latest，所以必须在 predict 之前取定位点。
         val anchor = selection.latest
+        // 【Fix】删除后的插入点（目标框坐标系）：从 anchor 起点删 before 个字符后光标落在这里
+        val expectedCursor = (anchor.start - before).coerceAtLeast(0)
         ic.withBatchEdit {
             if (anchor.isEmpty()) {
                 val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
@@ -410,7 +435,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             } else {
                 deleteSurroundingText(before, after)
             }
+            // 【Fix】删除后显式把目标框光标放回删除点，并登记为权威光标，
+            // 避免目标框把光标留在原处（表现为"退格后光标错位"）。
+            setSelection(expectedCursor, expectedCursor)
         }
+        inputView?.advanceTopAuthoritativeCursor(expectedCursor)
+        Timber.i("handleDeleteSurrounding: before=$before after=$after anchor=${anchor.start} authoritative=$expectedCursor")
         // 【Fix】删除后顶部框光标才是权威，用它覆盖本端 selection，
         // 避免目标框回调的滞后光标把下一次插入点带偏。
         // 顺序在 syncToTopEditText 之前，保证两次 post 的 FIFO 顺序。
@@ -491,6 +521,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             currentInputEditorInfo.inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL
         ) {
             sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+            // 【Fix】按键删除后插入点 = 原光标 - 1（有选区时 = 选区起点），显式推进权威光标，
+            // 否则顶部框异步刷新前读到的旧光标会把目标框光标拉回删除前位置。
+            val expected = if (lastSelection.isNotEmpty()) lastSelection.start
+            else (lastSelection.start - 1).coerceAtLeast(0)
+            inputView?.advanceTopAuthoritativeCursor(expected)
+            Timber.i("handleBackspaceKey(keyevent): authoritative=$expected")
             // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
             alignSelectionToTopEditText()
             // 同步到顶端EditText
@@ -500,12 +536,15 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         if (lastSelection.isEmpty()) {
             if (lastSelection.start <= 0) {
                 sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+                // 【Fix】光标已在 0，权威光标同样归零
+                inputView?.advanceTopAuthoritativeCursor(0)
                 // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
                 alignSelectionToTopEditText()
                 // 同步到顶端EditText
                 syncToTopEditText()
                 return
             }
+            val expected = (lastSelection.start - 1).coerceAtLeast(0)
             currentInputConnection.withBatchEdit {
                 // 【Fix】先按本端 selection 定位目标框光标，再删除，避免删错位置
                 val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
@@ -518,8 +557,13 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 } else {
                     deleteSurroundingText(1, 0)
                 }
+                // 【Fix】删除后显式把目标框光标放回删除点
+                setSelection(expected, expected)
             }
+            inputView?.advanceTopAuthoritativeCursor(expected)
+            Timber.i("handleBackspaceKey: authoritative=$expected")
         } else {
+            val expected = lastSelection.start
             currentInputConnection.withBatchEdit {
                 val len = (getTextBeforeCursor(1000, 0)?.length ?: 0) +
                         (getTextAfterCursor(1000, 0)?.length ?: 0)
@@ -527,7 +571,11 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                     setSelection(lastSelection.start, lastSelection.end)
                 }
                 commitText("", 0)
+                // 【Fix】删除选区后光标落在选区起点
+                setSelection(expected, expected)
             }
+            inputView?.advanceTopAuthoritativeCursor(expected)
+            Timber.i("handleBackspaceKey: delete selection [$lastSelection] authoritative=$expected")
         }
         // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
         alignSelectionToTopEditText()
@@ -683,6 +731,9 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 }
                 ic.finishComposingText()
             }
+            // 【Fix】组字上屏：插入点 = composing.start + cursor，写入后光标就在这里，
+            // 必须显式登记为权威光标，否则后续对齐会读到顶部框尚未刷新的旧光标。
+            inputView?.advanceTopAuthoritativeCursor(target)
             // 【Fix】先按顶部框光标对齐本端 selection，再投递顶部框内容同步，
             // 保证 syncToTopEditText 的 post 里对齐的是最新插入点。
             alignSelectionToTopEditText()
@@ -716,6 +767,10 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 // 目标框可能把光标留在插入点之后，这里再对齐一次，避免后续插入漂移
                 setSelection(target, target)
             }
+            // 【Fix】写入完成，插入点就是 target：显式推进权威光标，
+            // 顶部框内容稍后异步刷新时不再反向影响目标框光标。
+            inputView?.advanceTopAuthoritativeCursor(target)
+            Timber.i("commitText: inserted '$text' at $start, authoritative=$target")
         } else {
             val target = start + cursor
             selection.predict(target)
@@ -723,6 +778,8 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 commitText(text, 1)
                 setSelection(target, target)
             }
+            inputView?.advanceTopAuthoritativeCursor(target)
+            Timber.i("commitText: inserted '$text' cursor=$cursor, authoritative=$target")
         }
         // 【Fix】插入后以顶部框光标为准，覆盖目标框可能上报的滞后光标。
         // 顺序必须在 syncToTopEditText 之前：alignSelection 内部会 post 一次对齐，
@@ -839,6 +896,9 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
         selection.predict(lastSelection.start)
         currentInputConnection?.commitText("", 1)
+        // 【Fix】删除选区后插入点 = 选区起点，显式登记为权威光标
+        inputView?.advanceTopAuthoritativeCursor(lastSelection.start)
+        Timber.i("deleteSelection: [$lastSelection] authoritative=${lastSelection.start}")
 
         // 【Fix】先对齐本端 selection，再投递顶部框内容同步（post FIFO 顺序）
         alignSelectionToTopEditText()
@@ -968,7 +1028,13 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             // 但若目标框忽略 setSelection，顶部框会被拉回旧光标。因此这里置 pending：
             // 目标框接受则升级为权威，不接受则跟随目标框，避免两侧长期不一致。
             inputView?.markTopCursorPending()
-            inputView?.markTopCursorSyncIssued()
+            // 【Fix】pending 会清掉权威光标，这里必须重新登记本次移动后的位置，
+            // 否则 syncToTopEditText 的 post 对齐时会退化为读顶部框旧光标。
+            inputView?.advanceTopAuthoritativeCursor(start, authoritative = false)
+            // 【Fix】这里是主动移动光标：目标框若忽略 setSelection 或把光标改写到别处，
+            // 其不一致回调应视为回声忽略一次，避免权威光标被拉偏。
+            inputView?.markTopCursorSyncIssued(ignoreMismatch = true)
+            Timber.i("applySelectionOffset: target=($start,$end)")
             syncToTopEditText()
         }
     }
@@ -987,7 +1053,11 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         currentInputConnection?.setSelection(end, end)
         // 【Fix】同 applySelectionOffset：置 pending + 已发出，由目标框回调裁决
         inputView?.markTopCursorPending()
-        inputView?.markTopCursorSyncIssued()
+        // 【Fix】pending 会清掉权威光标，这里重新登记取消选区后的插入点
+        inputView?.advanceTopAuthoritativeCursor(end, authoritative = false)
+        // 【Fix】同 applySelectionOffset：主动移动光标，不一致回调视为回声忽略一次
+        inputView?.markTopCursorSyncIssued(ignoreMismatch = true)
+        Timber.i("cancelSelection: target=$end")
         syncToTopEditText()
     }
 
@@ -1577,7 +1647,10 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     ) {
         // onUpdateSelection can left behind when user types quickly enough, eg. long press backspace
         cursorUpdateIndex += 1
-        Timber.d("onUpdateSelection: old=[$oldSelStart,$oldSelEnd] new=[$newSelStart,$newSelEnd]")
+        Timber.i("onUpdateSelection: old=[$oldSelStart,$oldSelEnd] new=[$newSelStart,$newSelEnd]")
+        // 【Fix】先记录目标框上报的光标：alignSelectionToTopEditTextNow 用它判断
+        // "目标框是否已经处在权威光标位置"，避免重复 setSelection 制造回声。
+        inputView?.recordTargetCursor(newSelStart, newSelEnd)
         handleCursorUpdate(newSelStart, newSelEnd, cursorUpdateIndex)
         // 【Fix】顶部框光标"待确认"状态在这里裁决：
         // 目标框上报的光标与顶部框一致 → 确认顶部框权威（后续滞后回调不再覆盖）；
@@ -1591,14 +1664,28 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         // 只有再往后的回调才允许拒绝。
         val view = inputView
         if (view != null && !isPasswordInputType() && !isComposing) {
-            val (topStart, topEnd) = view.getTopEditTextSelection()
+            // 【Fix】比较基准改为"权威选区"：权威期间顶部框当前光标可能尚未被 post 刷新，
+            // 用它会误判为目标框拒绝，从而把权威状态丢掉。
+            val (topStart, topEnd) = view.getAuthoritativeSelection()
+            val authCursor = view.getAuthoritativeCursor()
             if (topStart == newSelStart && topEnd == newSelEnd) {
                 view.confirmTopEditTextAuthoritative()
             } else if (view.isTopCursorSyncIssued()) {
                 view.markTopCursorSyncEchoConsumed()
-                Timber.v("onUpdateSelection: ignore echo ($newSelStart,$newSelEnd), top=($topStart,$topEnd)")
+                // 【Fix】目标框上报的位置与权威光标不一致 → 目标框光标不可信，
+                // 标记失效，避免 alignSelectionToTopEditTextNow 用旧值短路 setSelection。
+                // 但若回调恰好落在权威光标上（只是选区宽度不同 / 权威选区被收敛为零宽），
+                // 说明目标框其实接受了本次移动，此时应视为已确认，不能置脏。
+                if (newSelStart == newSelEnd && newSelStart == authCursor) {
+                    view.resetTargetCursorStale()
+                } else {
+                    view.markTargetCursorStale()
+                }
+                Timber.i("onUpdateSelection: ignore echo ($newSelStart,$newSelEnd), top=($topStart,$topEnd) auth=$authCursor")
             } else {
                 view.rejectTopCursorPending()
+                view.markTargetCursorStale()
+                Timber.i("onUpdateSelection: reject pending, target=($newSelStart,$newSelEnd) top=($topStart,$topEnd) auth=$authCursor")
             }
         }
         inputView?.updateSelection(newSelStart, newSelEnd)

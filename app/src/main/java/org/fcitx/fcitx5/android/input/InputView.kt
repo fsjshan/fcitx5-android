@@ -120,21 +120,271 @@ class InputView(
     // 其后的第一个回调视为回声：一致则确认权威，不一致则忽略，只有再往后的回调才拒绝。
     private var topEditTextAuthoritative = false
 
+    /**
+     * 【Fix】权威光标：顶部框光标在"目标框坐标系"中的期望值。
+     *
+     * 旧实现每次对齐都去读顶部框当前光标，而顶部框内容是由 syncToTopEditText 异步刷新的，
+     * 因此 commitText / 退格之后读到的往往是"插入前"的旧光标，
+     * 于是目标框被 setSelection 回旧位置，表现为：
+     *   - 输入字符后光标停在新增字符之前；
+     *   - 退格后光标错位；
+     *   - 偶发跳变（旧值/新值交替覆盖）。
+     *
+     * 现在权威光标由本端在每次写入（提交/退格/删除/移动光标）后按"插入点 + 文本长度"
+     * 显式推进，顶部框内容刷新后只做展示，不再反向影响目标框光标。
+     */
+    private var topAuthoritativeCursor = -1
+
     /** 顶部框已把光标 setSelection 给目标框，等待其回声回调（见 onUpdateSelection）。 */
     private var topCursorSyncIssued = false
+
+    /**
+     * 【Fix】回声窗口：本端刚发出的 setSelection 对应的"期望光标"。
+     *
+     * 目标框收到 setSelection 后可能回调一个被改写的位置（例如插入点+1），
+     * 若把它当成用户操作，就会把权威光标拉偏。这里记录最近一次发出的期望值，
+     * 在其后的第一个不一致回调上视为回声忽略一次。
+     */
+    private var topCursorEchoTarget = -1
+    private var topCursorEchoPending = false
+
+    /**
+     * 【Fix】回声窗口是否允许"不一致即忽略"。
+     *
+     * 只有本端主动 setSelection（syncCursorToTargetInputField / alignSelectionToTopEditTextNow）
+     * 才需要拦截被 App 改写的回声；而 commitText / 退格 / 删除之后，目标框回调的
+     * "插入点 + 文本长度"是**正确**结果，此时若把它当回声忽略，权威光标就会停在
+     * 插入点之前（表现为"输入后光标停在新增字符之前"）。
+     *
+     * 因此 markTopCursorSyncIssued() 默认不开启忽略，仅由主动移动光标的路径显式开启。
+     */
+    private var topCursorEchoIgnoreMismatch = false
+
+    /** 目标框最近一次上报的光标（供 syncFromTargetInputField 判断是否已被接受）。 */
+    private var lastTargetCursor = -1
+
+    /**
+     * 【Fix】目标框光标是否已确认失效。
+     *
+     * 目标框上报的光标一旦与权威光标不一致，说明它没有接受本端的 setSelection
+     * （或被 App 改写），此后 [lastTargetCursor] 不能再用来短路 setSelection，
+     * 否则目标框会永远停在错误位置（表现为"输入后光标停在新增字符之前"）。
+     * 每次本端发出 setSelection 后重置为 false。
+     */
+    private var targetCursorStale = false
+
+    /**
+     * 记录目标框上报的光标（由 [FcitxInputMethodService.onUpdateSelection] 调用）。
+     *
+     * 【Fix】目标框上报了与权威光标不一致的位置，说明它没有接受本端的 setSelection
+     * （或被 App 改写），此时必须把 [lastTargetCursor] 标记失效；
+     * 否则 alignSelectionToTopEditTextNow 会拿这个旧值短路 setSelection，
+     * 目标框光标永远停在错误位置（表现为"输入后光标停在新增字符之前"）。
+     */
+    fun recordTargetCursor(start: Int, end: Int) {
+        if (start != end || start < 0) return
+        lastTargetCursor = start
+        val auth = topAuthoritativeCursor
+        if (topEditTextAuthoritative && auth >= 0 && start != auth) {
+            targetCursorStale = true
+        }
+    }
+
+    /**
+     * 【Fix】目标框上报了与权威光标不一致的位置 → 标记 [lastTargetCursor] 失效。
+     * 由 [FcitxInputMethodService.onUpdateSelection] 在裁决阶段调用。
+     */
+    fun markTargetCursorStale() {
+        targetCursorStale = true
+    }
+
+    /**
+     * 目标框光标是否可信任（可用于跳过重复 setSelection）。
+     * 必须同时满足：未被标记失效、且上报值与期望值一致。
+     */
+    fun isTargetCursorConfirmed(expected: Int): Boolean =
+        !targetCursorStale && lastTargetCursor == expected
+
+    /** 本端刚发出 setSelection，目标框光标重新进入待确认状态。 */
+    fun resetTargetCursorStale() {
+        targetCursorStale = false
+    }
+
+    fun getLastTargetCursor(): Int = lastTargetCursor
 
     /** 顶部框光标是否已 setSelection 给目标框、等待其回声回调。 */
     fun isTopCursorSyncIssued(): Boolean = topCursorSyncIssued
 
-    /** 标记"顶部框已把光标发给目标框"。 */
-    fun markTopCursorSyncIssued() {
+    /**
+     * 标记"顶部框已把光标发给目标框"。
+     *
+     * 【Fix】同时登记回声窗口：目标框若回调一个被改写的位置（插入点+1、忽略 setSelection 等），
+     * 该回调会被识别为回声并忽略一次，不再把权威光标拉偏。
+     *
+     * @param ignoreMismatch 是否允许把"与期望不一致"的回调当作回声忽略。
+     *   只有主动移动光标（setSelection）的路径才应为 true；
+     *   写入文本（commitText / 退格 / 删除）之后目标框回调的位置本身就是正确结果，
+     *   必须为 false，否则会把正确的光标当成回声丢掉。
+     */
+    fun markTopCursorSyncIssued(ignoreMismatch: Boolean = false) {
         topCursorSyncIssued = true
+        // 【Fix】回声窗口的期望值取"本端刚发出的光标"：
+        // 权威光标已登记时用它，否则退化为顶部框当前光标（例如首次同步）。
+        topCursorEchoTarget = if (topAuthoritativeCursor >= 0) {
+            topAuthoritativeCursor
+        } else {
+            getTopEditTextCursor()
+        }
+        topCursorEchoPending = true
+        topCursorEchoIgnoreMismatch = ignoreMismatch
+        // 【Fix】本端刚发出 setSelection，目标框光标重新进入待确认状态
+        targetCursorStale = false
+        // 【Fix】已发出意味着 pending 由回声裁决接管，这里撤销 pending 标记，
+        // 否则 syncToTopEditText 的 post 会因 isTopCursorPending() 反复对齐，
+        // 与回声窗口叠加产生多余 setSelection（光标跳变来源之一）。
+        topCursorPending = false
     }
 
     /** 回声回调已消费，后续回调恢复正常裁决。 */
     fun markTopCursorSyncEchoConsumed() {
         topCursorSyncIssued = false
+        topCursorEchoPending = false
+        topCursorEchoTarget = -1
+        topCursorEchoIgnoreMismatch = false
     }
+
+    /** 当前是否存在待消费的回声窗口。 */
+    fun hasPendingCursorEcho(): Boolean = topCursorEchoPending
+
+    /**
+     * 消费回声窗口：若本次回调位置与最近一次发出的期望光标不一致，则视为回声。
+     *
+     * @return true 表示本次回调已被判定为回声，调用方应忽略它。
+     */
+    fun consumeCursorEchoIfMismatched(start: Int, end: Int): Boolean {
+        if (!topCursorEchoPending) return false
+        // 无论是否判定为回声，窗口都只消费一次
+        val expected = topCursorEchoTarget
+        val ignoreMismatch = topCursorEchoIgnoreMismatch
+        topCursorEchoPending = false
+        topCursorEchoTarget = -1
+        topCursorEchoIgnoreMismatch = false
+        if (start == end && start == expected) {
+            // 目标框接受了我们的 setSelection，回声与期望一致
+            return false
+        }
+        // 【Fix】写入文本（commitText / 退格 / 删除）之后，目标框回调的位置
+        // 就是"插入点 + 文本长度"，是正确结果，不能当回声忽略。
+        if (!ignoreMismatch) return false
+        // 【Fix】目标框上报了与期望不一致的位置 → 它没有接受本次 setSelection（或把光标改写到别处），
+        // 该值不可信，标记失效，避免 alignSelectionToTopEditTextNow 用它短路 setSelection。
+        markTargetCursorStale()
+        // 【Fix】回调位置恰好等于权威光标（只是选区宽度不同）→ 目标框其实接受了本次移动，
+        // 只是把选区收成了零宽光标，这是正确结果，不能当回声吞掉。
+        // 必须在组字判断之前放行：否则组字期间该回调被 composing 逻辑处理，
+        // 组字结束后权威光标与目标框会长期错位。
+        val auth = getAuthoritativeCursor()
+        if (auth >= 0 && start == auth) return false
+        // 组字期间的回调由 composing 逻辑处理，这里不拦截
+        if (service.isComposing) return false
+        // 【Fix】用户主动移动光标（方向键 / 点击 / Home / End）后，目标框回调的位置
+        // 是真实结果，不是回声，不能吞掉；否则权威光标会停在移动前的位置，
+        // 下一次插入落在错误位置（表现为"方向键移动后输入位置不对"）。
+        // 这类路径由 markTopCursorPending() + advanceTopAuthoritativeCursor(authoritative = false)
+        // 登记：权威标志已撤销，但权威光标仍是本端期望值。
+        if (!topEditTextAuthoritative) return false
+        // 【Fix】不一致时不能一律忽略：用户可能在 setSelection 之后立刻点击/移动了光标，
+        // 这时回调是真实用户操作，忽略它会让顶部框光标与目标框长期错位。
+        // 因此只在"回调位置与权威光标不一致"时忽略一次。
+        return true
+    }
+
+    /**
+     * 【Fix】推进权威光标（目标框坐标系），并同步刷新 [topAuthoritativeCursor]。
+     *
+     * 由 [FcitxInputMethodService] 在每次写入 / 移动光标后调用，
+     * 保证后续 [FcitxInputMethodService.alignSelectionToTopEditText] 使用的是
+     * "刚写入完成后的插入点"，而不是顶部框尚未刷新时的旧光标。
+     */
+    fun advanceTopAuthoritativeCursor(cursor: Int, authoritative: Boolean = true) {
+        topAuthoritativeCursor = cursor.coerceAtLeast(0)
+        // 【Fix】本端刚改写了目标框内容/光标，目标框此前上报的光标不再可信；
+        // 否则 alignSelectionToTopEditTextNow 会用它短路 setSelection，
+        // 目标框光标永远停在旧位置（表现为"输入后光标停在新增字符之前"）。
+        targetCursorStale = true
+        // 【Fix】权威光标已由本端显式推进，此前登记的"已发出/回声窗口"已失效：
+        // 若残留，目标框紧随其后的真实回调会被 onUpdateSelection 当成回声吞掉
+        // （表现为 updateSelection 里"忽略回声"后光标不再前进）。
+        // 清掉后由调用方按需重新 markTopCursorSyncIssued。
+        // 【Fix2】必须无条件清理，不能只在 authoritative=true 时清理：
+        // applySelectionOffset / cancelSelection 走的是 authoritative=false，
+        // 若残留旧回声窗口，紧随其后的真实回调会被 consumeCursorEchoIfMismatched
+        // 当成回声丢弃，目标框光标停在移动前的位置（表现为方向键移动无效）。
+        topCursorSyncIssued = false
+        topCursorEchoPending = false
+        topCursorEchoTarget = -1
+        topCursorEchoIgnoreMismatch = false
+        if (authoritative) {
+            topEditTextAuthoritative = true
+            topCursorPending = false
+        }
+    }
+
+    /**
+     * 顶部框光标（权威值优先）。
+     *
+     * 权威期间返回 [topAuthoritativeCursor]（本端显式推进的值），
+     * 否则返回顶部框当前光标。
+     */
+    fun getAuthoritativeCursor(): Int {
+        if (topEditTextAuthoritative && topAuthoritativeCursor >= 0) return topAuthoritativeCursor
+        return getTopEditTextCursor()
+    }
+
+    /**
+     * 顶部框选区（权威值优先）。权威期间返回零宽选区，避免用顶部框旧选区覆盖目标框。
+     */
+    fun getAuthoritativeSelection(): Pair<Int, Int> {
+        if (topEditTextAuthoritative && topAuthoritativeCursor >= 0) {
+            return topAuthoritativeCursor to topAuthoritativeCursor
+        }
+        return getTopEditTextSelection()
+    }
+
+    /**
+     * 【Fix】在顶部框内按插入点插入文本（顶部框是唯一内容来源，目标框随后由
+     * [FcitxInputMethodService.syncToTopEditText] 回读刷新）。
+     *
+     * 之前 commitText 只写目标框，顶部框要等异步 post 才更新，
+     * 于是"对齐光标"读到的是插入前的旧光标。现在先本地插入，光标天然落在新字符之后。
+     *
+     * @param position 插入点（顶部框坐标系），越界时收敛到 [0, length]
+     * @param text 待插入文本
+     * @param selectionEnd 替换选区终点（默认等于 position，即纯插入）
+     * @return 插入后的光标位置；顶部框不可用时返回 -1
+     */
+    fun insertIntoTopEditText(position: Int, text: String, selectionEnd: Int = position): Int {
+        val et = currentContentEditText
+        val len = et.length()
+        val start = position.coerceIn(0, len)
+        val end = selectionEnd.coerceIn(start, len)
+        isSyncing = true
+        try {
+            val editable = et.text ?: return -1
+            editable.replace(start, end, text)
+            val newCursor = (start + text.length).coerceIn(0, et.length())
+            et.setSelection(newCursor)
+            return newCursor
+        } catch (e: Exception) {
+            Timber.w("insertIntoTopEditText failed: ${e.message}")
+            return -1
+        } finally {
+            isSyncing = false
+        }
+    }
+
+    /** 顶部框文本长度（顶部框是内容唯一来源）。 */
+    fun getTopEditTextLength(): Int = currentContentEditText.length()
 
     /**
      * 顶部 EditText 光标是否应作为权威来源（供 [FcitxInputMethodService] 判断）。
@@ -189,6 +439,12 @@ class InputView(
         topEditTextAuthoritative = false
         topCursorPending = false
         topCursorSyncIssued = false
+        topAuthoritativeCursor = -1
+        topCursorEchoPending = false
+        topCursorEchoTarget = -1
+        topCursorEchoIgnoreMismatch = false
+        lastTargetCursor = -1
+        targetCursorStale = false
     }
 
     /**
@@ -210,11 +466,19 @@ class InputView(
 
     /**
      * 记录"顶部框光标已变化，等待目标框确认"，并清掉旧的权威状态。
+     *
+     * 【Fix】不清 [topAuthoritativeCursor]：本端在写入/移动之后会先登记权威光标再调用本方法，
+     * 若这里把它清掉，后续 [confirmTopEditTextAuthoritative] 只能退化为读顶部框当前光标
+     * （顶部框内容由 post 异步刷新，此刻仍是旧值），权威光标会被拉回插入前的位置。
+     * 权威光标只由 [advanceTopAuthoritativeCursor] / [clearTopEditTextAuthoritative] 改写。
      */
     fun markTopCursorPending() {
         topCursorPending = true
         topEditTextAuthoritative = false
         topCursorSyncIssued = false
+        topCursorEchoPending = false
+        topCursorEchoTarget = -1
+        topCursorEchoIgnoreMismatch = false
     }
 
     /**
@@ -222,9 +486,18 @@ class InputView(
      */
     fun confirmTopEditTextAuthoritative() {
         topCursorSyncIssued = false
+        topCursorEchoPending = false
+        topCursorEchoTarget = -1
+        topCursorEchoIgnoreMismatch = false
         if (!topCursorPending) return
         topCursorPending = false
         topEditTextAuthoritative = true
+        // 目标框已确认顶部框光标，把它固化为权威光标。
+        // 【Fix】优先保留已登记的权威光标（写入/移动路径显式推进的值），
+        // 只有从未登记过时才退化为读顶部框当前光标。
+        if (topAuthoritativeCursor < 0) {
+            topAuthoritativeCursor = getTopEditTextCursor()
+        }
     }
 
     /**
@@ -234,6 +507,9 @@ class InputView(
     fun rejectTopCursorPending() {
         topCursorPending = false
         topCursorSyncIssued = false
+        topCursorEchoPending = false
+        topCursorEchoTarget = -1
+        topCursorEchoIgnoreMismatch = false
     }
 
     // 【Fix】原 isPasswordFieldCleared 字段已删除：密码框改为完全由明文缓存
@@ -760,6 +1036,14 @@ class InputView(
 
     fun updateSelection(start: Int, end: Int) {
         broadcaster.onSelectionUpdate(start, end)
+        // 【Fix】记录目标框上报的光标（供 syncFromTargetInputField / 对齐逻辑判断是否已被接受）
+        recordTargetCursor(start, end)
+        // 【Fix】回声窗口：本端刚发出的 setSelection 若被目标 App 改写（例如插入点+1、
+        // 或干脆忽略），其第一个回调应被忽略一次，不能当成用户操作去覆盖权威光标。
+        if (consumeCursorEchoIfMismatched(start, end)) {
+            Timber.i("updateSelection: ignore cursor echo ($start,$end), authoritative=${getAuthoritativeCursor()}")
+            return
+        }
         // 【Fix】密码输入框不再做全量 syncFromTargetInputField()：
         // 原实现每次 onUpdateSelection 都全量同步（3 次 Binder IPC + setText），
         // 会把用户在顶端框里刚移动的光标又拉回目标框旧光标位置，
@@ -777,7 +1061,19 @@ class InputView(
         // 注意：pending 状态（顶部框刚移动光标、目标框尚未确认）不能在此拦截，
         // 否则第 2 步"目标框确认/拒绝"的判断永远拿不到目标框的真实光标。
         if (isTopEditTextAuthoritative()) {
-            Timber.v("updateSelection ignored: top EditText is authoritative, target=($start,$end)")
+            // 【Fix】权威期间目标框上报的位置若与权威光标不一致，说明目标框没有接受
+            // 本端的 setSelection（或把光标改写到了别处）。此时必须标记目标框光标失效，
+            // 否则 alignSelectionToTopEditTextNow 会拿这个旧值短路 setSelection，
+            // 目标框光标永远停在错误位置（表现为"输入后光标停在新增字符之前"）。
+            val auth = getAuthoritativeCursor()
+            if (start == end && start != auth) {
+                markTargetCursorStale()
+            } else if (start == end && start == auth) {
+                // 【Fix】目标框已上报到权威光标位置 → 该值可信，允许 alignSelectionToTopEditTextNow
+                // 短路后续 setSelection（避免多余 Binder IPC 与回声回调）。
+                resetTargetCursorStale()
+            }
+            Timber.i("updateSelection ignored: top EditText is authoritative, target=($start,$end) auth=$auth")
             return
         }
         try {
@@ -911,7 +1207,14 @@ class InputView(
             // 目标框光标（getTextBeforeCursor 长度）在部分 App 上滞后或被改写，
             // 无条件采用会把顶部框光标拉走，表现为"输入过程中光标跳变"。
             val keepTopCursor = isTopEditTextAuthoritative()
-            val topCursor = if (keepTopCursor) getTopEditTextCursor() else 0
+            Timber.i("syncFromTargetInputField: targetLen=${targetContent.length} targetCursor=$cursorPosition keepTop=$keepTopCursor authCursor=${getAuthoritativeCursor()}")
+            // 【Fix】权威期间用"权威光标"（本端显式推进的插入点），而不是顶部框当前光标：
+            // 顶部框内容由本方法异步刷新，此刻读到的可能是插入前的旧光标。
+            val topCursor = if (keepTopCursor) {
+                getAuthoritativeCursor().coerceIn(0, targetContent.length)
+            } else {
+                0
+            }
 
             // 检查内容长度，避免过长内容
             if (targetContent.length > 2000) {
@@ -922,20 +1225,32 @@ class InputView(
             } else {
                 // 非密码框，正常内容比较
                 if (currentContentEditText.text?.toString() != targetContent) {
-                    currentContentEditText.setText(targetContent)
-
-                    // 设置光标位置，确保不超出文本长度
+                    // 【Fix】setText 会重置光标到 0，且会触发 onSelectionChanged；
+                    // 这里必须用 isSyncing 包裹并显式 setSelection，否则顶部框光标
+                    // 会被"内容刷新"这一步带偏（表现为输入后光标跳到开头/末尾）。
                     val safePosition = if (keepTopCursor) {
                         minOf(topCursor, targetContent.length)
                     } else {
                         minOf(cursorPosition, targetContent.length)
                     }
+                    currentContentEditText.setText(targetContent)
                     currentContentEditText.setSelection(safePosition)
+                    Timber.i("syncFromTargetInputField: content refreshed, topCursor=$safePosition")
                 } else if (!keepTopCursor) {
                     // 内容一致且顶部框不是权威来源时，才跟随目标框光标
                     val safePosition = minOf(cursorPosition, targetContent.length)
                     if (currentContentEditText.selectionStart != safePosition) {
                         currentContentEditText.setSelection(safePosition)
+                    }
+                } else {
+                    // 【Fix】权威期间内容一致：顶部框光标只做展示性校正（不改变权威光标），
+                    // 保证用户看到的插入符与目标框实际插入点一致。
+                    val expected = minOf(topCursor, targetContent.length)
+                    if (currentContentEditText.selectionStart != expected ||
+                        currentContentEditText.selectionEnd != expected
+                    ) {
+                        currentContentEditText.setSelection(expected)
+                        Timber.i("syncFromTargetInputField: top cursor corrected to $expected")
                     }
                 }
             }
@@ -965,6 +1280,8 @@ class InputView(
         }
         // 【Fix】顶部框内容变化代表用户主动编辑，但光标位置是否被目标框接受仍需确认：
         // 这里只进入待确认状态，避免目标框忽略 setSelection 时顶部框光标被"假权威"锁死。
+        // 【Fix2】markTopCursorPending() 会清掉 pending/已发出/回声窗口，
+        // 因此必须在读取顶部框光标之前调用：它只改状态，不改文本与 selection。
         markTopCursorPending()
 
         try {
@@ -1000,9 +1317,20 @@ class InputView(
                     
                     // 设置光标位置，确保在有效范围内
                     ic.setSelection(safePosition, safePosition)
-                    // 【Fix】内容整体替换后同样标记"已发出"，让回声回调不拒掉 pending
-                    markTopCursorSyncIssued()
-                    
+                    // 【Fix】全量替换后目标框插入点就是 safePosition，先登记为权威光标，
+                    // 再标记"已发出"（回声窗口的期望值取自权威光标），
+                    // 避免后续对齐时读到顶部框尚未刷新的旧光标
+                    advanceTopAuthoritativeCursor(safePosition)
+                    // 【Fix】全量替换是"写入文本"：目标框回调的插入点就是正确结果，
+                    // 不能当作回声忽略（否则权威光标停在替换前的位置）。
+                    markTopCursorSyncIssued(ignoreMismatch = false)
+                    // 【Fix】本端刚把内容整体替换掉，目标框此前上报的光标已无意义。
+                    // 但 markTopCursorSyncIssued 已把 stale 清为 false，这里再显式置脏：
+                    // 替换后的目标框光标必须由 onUpdateSelection 重新确认，
+                    // 否则 alignSelectionToTopEditTextNow 可能拿替换前的旧值短路 setSelection。
+                    markTargetCursorStale()
+                    Timber.i("syncToTargetInputField: full replace, cursor=$safePosition")
+
                     ic.endBatchEdit()
                 } catch (e: Exception) {
                     Timber.w("Failed to sync to target input field: ${e.message}")
@@ -1015,13 +1343,37 @@ class InputView(
                 // 或 onUpdateSelection 回调晚于下一次 commitText），
                 // 下一次插入就会落在目标框旧光标处，表现为"只有第一个字符插对"。
                 val ic = service.currentInputConnection ?: return
-                if (service.getTargetInputFieldCursorPosition() == safePosition) return
+                // 【Fix】这里不能再拿 getTargetInputFieldCursorPosition() 做短路判断：
+                // 它内部是 getTextBeforeCursor 的 Binder 返回值，目标 App 常常滞后或被改写
+                // （例如仍停在插入点之前），据此跳过 setSelection 会让目标框光标永远不前进，
+                // 表现为"输入后光标停在新增字符之前 / 退格错位"。
+                // 目标框光标是否已到位只认 onUpdateSelection 上报的值（isTargetCursorConfirmed）。
+                if (isTargetCursorConfirmed(safePosition)) {
+                    // 【Fix】目标框已上报过该位置（onUpdateSelection 确认），无需再发 setSelection，
+                    // 避免多一次 Binder IPC 与回声回调；但仍要登记权威光标，
+                    // 否则后续 commitText 会以旧插入点写入。
+                    advanceTopAuthoritativeCursor(safePosition)
+                    // 【Fix】目标框光标已确认在该位置，重新标记为"可信任"：
+                    // advanceTopAuthoritativeCursor 会把 targetCursorStale 置 true，
+                    // 若不清回，后续 alignSelectionToTopEditTextNow 会重复 setSelection，
+                    // 多出来的回声回调又会被误判，导致光标跳变。
+                    resetTargetCursorStale()
+                    Timber.i("syncToTargetInputField: target confirmed at $safePosition, skip setSelection")
+                    return
+                }
                 isSyncing = true
                 try {
                     service.predictSelection(safePosition, safePosition)
                     ic.setSelection(safePosition, safePosition)
-                    // 标记"已发出"，让目标框紧随其后的回声回调不会把 pending 拒掉
-                    markTopCursorSyncIssued()
+                    // 【Fix】顶部框移动光标后，权威光标立即跟随（不等目标框回声），
+                    // 否则回声被忽略时权威光标会停在旧位置，下一次插入落点错误。
+                    // 必须在 markTopCursorSyncIssued 之前登记，回声窗口的期望值取自权威光标。
+                    advanceTopAuthoritativeCursor(safePosition)
+                    // 标记"已发出"，让目标框紧随其后的回声回调不会把 pending 拒掉。
+                    // 【Fix】内容一致分支只是移动光标：目标框若忽略/改写 setSelection，
+                    // 其不一致回调应视为回声忽略一次。
+                    markTopCursorSyncIssued(ignoreMismatch = true)
+                    Timber.i("syncToTargetInputField: cursor synced to $safePosition")
                 } catch (e: Exception) {
                     Timber.w("Failed to sync cursor to target input field: ${e.message}")
                 } finally {
@@ -1072,9 +1424,15 @@ class InputView(
             isSyncing = true
             try {
                 ic.setSelection(safeSelStart, safeSelEnd)
-                // 标记"已发出"，让目标框紧随其后的回声回调不会把 pending 拒掉
-                markTopCursorSyncIssued()
-                Timber.v("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd")
+                // 【Fix】用户移动光标后立即登记权威光标（零宽），
+                // 后续 commitText 以它为插入点，不再依赖目标框回声。
+                // 必须在 markTopCursorSyncIssued 之前登记：回声窗口的期望值取自权威光标。
+                advanceTopAuthoritativeCursor(safeSelStart)
+                // 标记"已发出"，让目标框紧随其后的回声回调不会把 pending 拒掉。
+                // 【Fix】主动移动光标：目标框可能忽略 setSelection 或把光标改写到别处，
+                // 此时不一致的回调应视为回声忽略一次（否则权威光标会被拉偏）。
+                markTopCursorSyncIssued(ignoreMismatch = true)
+                Timber.i("Cursor synced to target: start=$safeSelStart, end=$safeSelEnd")
             } catch (e: Exception) {
                 Timber.w("Failed to sync cursor to target input field: ${e.message}")
             } finally {
